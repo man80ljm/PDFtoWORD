@@ -1,5 +1,15 @@
 {
-  "title_text": "程新伟专属转换器啊！！",
+  "title_text": "专用转换器",
   "background_image": "d:\\pythonProject\\PDFtoWORD\\background.jpg",
-  "panel_opacity": 0.0
+  "panel_opacity": 20.0,
+  "ocr_enabled": false,
+  "formula_api_enabled": false,
+  "baidu_api_key_enc": "dnBLNkxGSEFwYmlsOFUyMXIzNm9sUFVY",
+  "baidu_secret_key_enc": "UGVCczc4MUxrZXdUVWtUamJFTEs5TFdkVWxlQVowYlY=",
+  "xslt_path": "",
+  "current_function": "OCR可搜索PDF",
+  "image_dpi": "200",
+  "image_format": "PNG",
+  "split_mode": "每N页一个PDF",
+  "page_size": "A4"
 }

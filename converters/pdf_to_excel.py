@@ -1,0 +1,348 @@
+"""
+PDF转Excel — 从PDF中提取表格数据导出为Excel(.xlsx)文件
+
+使用 pdfplumber 进行表格识别，openpyxl 写入 Excel。
+支持：
+  - 多页PDF，每页表格写入独立Sheet
+  - 可选：所有表格合并到一个Sheet
+  - 页范围选择
+  - 自动列宽调整
+  - 空表格页跳过
+
+通过 on_progress 回调报告进度，不直接操作UI。
+"""
+
+import logging
+import os
+from datetime import datetime
+
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+
+# 表格提取策略
+TABLE_STRATEGIES = {
+    "自动检测": {
+        "description": "自动检测表格线（推荐，适合大多数PDF）",
+    },
+    "文本对齐": {
+        "description": "按文本位置对齐推断表格（适合无边框表格）",
+    },
+}
+
+
+class PDFToExcelConverter:
+    """PDF转Excel转换器 — 与 UI 完全解耦。
+
+    用法::
+
+        converter = PDFToExcelConverter(on_progress=my_callback)
+        result = converter.convert("input.pdf", strategy="自动检测")
+    """
+
+    def __init__(self, on_progress=None):
+        self.on_progress = on_progress or (lambda *a: None)
+
+    def _report(self, percent=-1, progress_text="", status_text=""):
+        self.on_progress(percent, progress_text, status_text)
+
+    def convert(self, input_file, output_path=None,
+                start_page=None, end_page=None,
+                strategy="自动检测",
+                merge_sheets=False):
+        """从PDF提取表格并导出为Excel。
+
+        Args:
+            input_file: 输入PDF路径
+            output_path: 输出xlsx路径，None则自动生成
+            start_page: 起始页(1-based)，None=第1页
+            end_page: 结束页(1-based)，None=最后一页
+            strategy: 表格提取策略（"自动检测" / "文本对齐"）
+            merge_sheets: True=所有表格合并到一个Sheet
+
+        Returns:
+            dict: success, message, output_file, table_count, total_rows
+        """
+        result = {
+            'success': False,
+            'message': '',
+            'output_file': '',
+            'table_count': 0,
+            'total_rows': 0,
+        }
+
+        if not PDFPLUMBER_AVAILABLE:
+            result['message'] = "pdfplumber 未安装！请执行: pip install pdfplumber"
+            return result
+
+        if not OPENPYXL_AVAILABLE:
+            result['message'] = "openpyxl 未安装！请执行: pip install openpyxl"
+            return result
+
+        if not input_file or not os.path.exists(input_file):
+            result['message'] = "请先选择PDF文件！"
+            return result
+
+        if not output_path:
+            dir_path = os.path.dirname(input_file)
+            basename = os.path.splitext(os.path.basename(input_file))[0]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(
+                dir_path, f"{basename}_表格_{timestamp}.xlsx")
+
+        try:
+            self._report(percent=0, progress_text="正在打开PDF...",
+                         status_text="读取PDF文件")
+
+            pdf = pdfplumber.open(input_file)
+            total_pages = len(pdf.pages)
+
+            if total_pages == 0:
+                pdf.close()
+                result['message'] = "PDF文件无内容"
+                return result
+
+            # 确定页范围（转为0-based索引）
+            s_idx = 0
+            e_idx = total_pages
+            if start_page is not None:
+                s_idx = max(0, min(start_page - 1, total_pages - 1))
+            if end_page is not None:
+                e_idx = max(s_idx + 1, min(end_page, total_pages))
+
+            pages_to_process = e_idx - s_idx
+
+            # 构建表格提取参数
+            table_settings = self._build_table_settings(strategy)
+
+            # 创建 Excel 工作簿
+            wb = openpyxl.Workbook()
+            # 移除默认Sheet（稍后按需创建）
+            wb.remove(wb.active)
+
+            total_tables = 0
+            total_rows = 0
+            merged_sheet = None
+            merged_row_offset = 0
+
+            if merge_sheets:
+                merged_sheet = wb.create_sheet(title="所有表格")
+
+            for i, page_idx in enumerate(range(s_idx, e_idx)):
+                page = pdf.pages[page_idx]
+                page_num = page_idx + 1
+
+                percent = int((i / pages_to_process) * 90)
+                self._report(
+                    percent=percent,
+                    progress_text=f"提取第 {page_num} 页表格... ({percent}%)",
+                    status_text=f"第 {page_num}/{total_pages} 页"
+                )
+
+                # 提取表格
+                tables = page.extract_tables(table_settings)
+
+                if not tables:
+                    continue
+
+                for t_idx, table_data in enumerate(tables):
+                    if not table_data:
+                        continue
+
+                    # 清理表格数据
+                    cleaned = self._clean_table(table_data)
+                    if not cleaned:
+                        continue
+
+                    total_tables += 1
+
+                    if merge_sheets and merged_sheet is not None:
+                        # 合并模式：加一行标题行标识来源
+                        if merged_row_offset > 0:
+                            merged_row_offset += 1  # 表格间空一行
+
+                        # 写入来源标记
+                        merged_row_offset += 1
+                        cell = merged_sheet.cell(
+                            row=merged_row_offset, column=1,
+                            value=f"— 第{page_num}页 表格{t_idx + 1} —")
+                        cell.font = Font(bold=True, color="4472C4")
+
+                        # 写入表格数据
+                        for row in cleaned:
+                            merged_row_offset += 1
+                            total_rows += 1
+                            for col_idx, value in enumerate(row, 1):
+                                merged_sheet.cell(
+                                    row=merged_row_offset, column=col_idx,
+                                    value=value)
+                    else:
+                        # 独立Sheet模式
+                        sheet_name = self._make_sheet_name(
+                            f"第{page_num}页", t_idx, wb)
+                        ws = wb.create_sheet(title=sheet_name)
+
+                        for row_idx, row in enumerate(cleaned, 1):
+                            total_rows += 1
+                            for col_idx, value in enumerate(row, 1):
+                                ws.cell(row=row_idx, column=col_idx,
+                                        value=value)
+
+                        # 样式：首行加粗 + 自动列宽
+                        self._style_sheet(ws)
+
+            pdf.close()
+
+            if total_tables == 0:
+                result['message'] = (
+                    f"在第 {s_idx + 1}~{e_idx} 页中未检测到表格。\n\n"
+                    f"建议：\n"
+                    f"• 如果PDF是扫描版图片，请先使用「OCR可搜索PDF」功能\n"
+                    f"• 尝试切换提取策略为「文本对齐」"
+                )
+                return result
+
+            # 合并模式下调整样式
+            if merge_sheets and merged_sheet is not None:
+                self._style_sheet(merged_sheet)
+
+            # 如果没有任何Sheet（不应该发生）
+            if len(wb.sheetnames) == 0:
+                wb.create_sheet(title="空")
+
+            # 保存
+            self._report(percent=92, progress_text="正在保存Excel...",
+                         status_text="写入xlsx文件")
+            wb.save(output_path)
+
+            result['success'] = True
+            result['output_file'] = output_path
+            result['table_count'] = total_tables
+            result['total_rows'] = total_rows
+            result['message'] = (
+                f"提取完成！\n"
+                f"处理了 {pages_to_process} 页，发现 {total_tables} 个表格\n"
+                f"共 {total_rows} 行数据"
+            )
+            self._report(percent=100, progress_text="提取完成！")
+
+        except Exception as e:
+            logging.error(f"PDF转Excel失败: {e}", exc_info=True)
+            result['message'] = f"转换失败：{str(e)}"
+
+        return result
+
+    @staticmethod
+    def _build_table_settings(strategy):
+        """根据策略构建 pdfplumber 表格提取参数"""
+        if strategy == "文本对齐":
+            return {
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text",
+                "snap_tolerance": 5,
+                "join_tolerance": 5,
+                "min_words_vertical": 2,
+                "min_words_horizontal": 2,
+            }
+        else:
+            # 自动检测（默认）：优先用线条，回退到文本
+            return {
+                "vertical_strategy": "lines",
+                "horizontal_strategy": "lines",
+                "snap_tolerance": 3,
+                "join_tolerance": 3,
+            }
+
+    @staticmethod
+    def _clean_table(table_data):
+        """清理表格数据：去除空行、规范化单元格内容"""
+        cleaned = []
+        for row in table_data:
+            if row is None:
+                continue
+            clean_row = []
+            for cell in row:
+                if cell is None:
+                    clean_row.append("")
+                else:
+                    # 合并换行、去除多余空白
+                    text = str(cell).strip()
+                    text = ' '.join(text.split())
+                    clean_row.append(text)
+            # 跳过全空行
+            if any(c for c in clean_row):
+                cleaned.append(clean_row)
+        return cleaned
+
+    @staticmethod
+    def _make_sheet_name(base_name, table_idx, wb):
+        """生成唯一的Sheet名称（Excel限31字符）"""
+        if table_idx == 0:
+            name = base_name
+        else:
+            name = f"{base_name}_表{table_idx + 1}"
+
+        # Excel Sheet名最长31字符
+        name = name[:31]
+
+        # 确保唯一
+        existing = set(wb.sheetnames)
+        if name not in existing:
+            return name
+        suffix = 2
+        while True:
+            candidate = f"{name[:28]}_{suffix}"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
+
+    @staticmethod
+    def _style_sheet(ws):
+        """为工作表添加样式：首行加粗、自动列宽、边框"""
+        if ws.max_row is None or ws.max_row == 0:
+            return
+
+        thin_border = Border(
+            left=Side(style='thin', color='D9D9D9'),
+            right=Side(style='thin', color='D9D9D9'),
+            top=Side(style='thin', color='D9D9D9'),
+            bottom=Side(style='thin', color='D9D9D9'),
+        )
+
+        header_font = Font(bold=True)
+        wrap_alignment = Alignment(wrap_text=True, vertical='center')
+
+        # 遍历所有单元格
+        for row_idx, row in enumerate(ws.iter_rows(
+                min_row=1, max_row=ws.max_row,
+                max_col=ws.max_column), 1):
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = wrap_alignment
+                if row_idx == 1:
+                    cell.font = header_font
+
+        # 自动列宽
+        for col_idx in range(1, (ws.max_column or 0) + 1):
+            max_len = 0
+            col_letter = get_column_letter(col_idx)
+            for cell in ws[col_letter]:
+                if cell.value:
+                    # 估算中文字符宽度（中文字符约占2个英文字符宽度）
+                    text = str(cell.value)
+                    char_len = sum(2 if ord(c) > 127 else 1 for c in text)
+                    max_len = max(max_len, char_len)
+            # 限制列宽范围
+            adjusted_width = min(max(max_len + 2, 8), 60)
+            ws.column_dimensions[col_letter].width = adjusted_width

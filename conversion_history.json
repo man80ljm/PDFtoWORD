@@ -1,0 +1,91 @@
+[
+  {
+    "function": "OCR可搜索PDF",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/识别测试.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\识别测试_可搜索_20260210_213951.pdf",
+    "success": true,
+    "message": "OCR完成！\n处理了 2 页，识别 3401 个字符\nPDF已变为可搜索版本，外观不变",
+    "page_count": 2,
+    "timestamp": "2026-02-10 21:40:01"
+  },
+  {
+    "function": "PDF删除页面",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147\\中国出土壁画全集 4_山东_13292055_第1-30页_删除_20260210_213001.pdf",
+    "success": true,
+    "message": "成功删除 16 页\n删除的页码：1-2, 5, 8-20\n原始 30 页 → 剩余 14 页",
+    "page_count": 14,
+    "timestamp": "2026-02-10 21:30:01"
+  },
+  {
+    "function": "PDF压缩",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147\\中国出土壁画全集 4_山东_13292055_第1-30页_压缩_20260210_212236.pdf",
+    "success": true,
+    "message": "压缩完成！\n原始大小：9.79 MB\n压缩后：7.36 MB\n减小了 24.8%（节省 2.43 MB）",
+    "page_count": 30,
+    "timestamp": "2026-02-10 21:22:40"
+  },
+  {
+    "function": "PDF拆分",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\中国出土壁画全集 4_山东_13292055_拆分_20260210_212147",
+    "success": true,
+    "message": "成功拆分为 9 个文件",
+    "page_count": 259,
+    "timestamp": "2026-02-10 21:21:48"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/ceshi/图片转PDF_20260210_183940.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/ceshi\\图片转PDF_20260210_183940_水印_20260210_191626.pdf",
+    "success": true,
+    "message": "成功为 2 页添加水印",
+    "page_count": 2,
+    "timestamp": "2026-02-10 19:16:26"
+  },
+  {
+    "function": "PDF加密",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/ceshi/图片转PDF_20260210_183940.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/ceshi\\图片转PDF_20260210_183940_加密_20260210_190226.pdf",
+    "success": true,
+    "message": "加密成功！共 2 页\n打开密码: 已设置\n权限密码: 未设置\n允许操作: 打印、复制、注释",
+    "page_count": 2,
+    "timestamp": "2026-02-10 19:02:26"
+  },
+  {
+    "function": "PDF加密",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/ceshi/图片转PDF_20260210_183940.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/ceshi\\图片转PDF_20260210_183940_加密_20260210_190139.pdf",
+    "success": true,
+    "message": "加密成功！共 2 页\n打开密码: 已设置\n权限密码: 未设置\n允许操作: 打印、复制、注释",
+    "page_count": 2,
+    "timestamp": "2026-02-10 19:01:39"
+  },
+  {
+    "function": "图片转PDF",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/ceshi/0.jpg",
+      "D:/pythonProject/PDFtoWORD/dist/ceshi/1.jpg"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/ceshi\\图片转PDF_20260210_183940.pdf",
+    "success": true,
+    "message": "成功将 2 张图片转换为PDF",
+    "page_count": 2,
+    "timestamp": "2026-02-10 18:39:40"
+  }
+]

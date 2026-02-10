@@ -1,2 +1,10 @@
-pdf2docx
-Pillow
+pdf2docx>=0.5.6
+python-docx>=0.8.11
+PyMuPDF>=1.23.0
+Pillow>=9.0.0
+requests>=2.28.0
+latex2mathml>=3.0
+lxml>=4.9.0
+windnd>=1.0.7
+pdfplumber>=0.10.0
+openpyxl>=3.1.0
