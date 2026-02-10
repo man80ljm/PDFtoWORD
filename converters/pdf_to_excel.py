@@ -12,8 +12,10 @@ PDF转Excel — 从PDF中提取表格数据导出为Excel(.xlsx)文件
 通过 on_progress 回调报告进度，不直接操作UI。
 """
 
+import io
 import logging
 import os
+import re
 from datetime import datetime
 
 try:
@@ -30,14 +32,15 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
+from core.ocr_client import BaiduOCRClient, REQUESTS_AVAILABLE
 
 # 表格提取策略
 TABLE_STRATEGIES = {
     "自动检测": {
-        "description": "自动检测表格线（推荐，适合大多数PDF）",
+        "description": "先按表格线检测，若行数明显偏少自动回退为文本对齐",
     },
     "文本对齐": {
-        "description": "按文本位置对齐推断表格（适合无边框表格）",
+        "description": "按文本位置对齐推断表格（适合无边框/线条断裂表格）",
     },
 }
 
@@ -60,7 +63,9 @@ class PDFToExcelConverter:
     def convert(self, input_file, output_path=None,
                 start_page=None, end_page=None,
                 strategy="自动检测",
-                merge_sheets=False):
+                merge_sheets=False,
+                extract_mode="结构提取",
+                api_key=None, secret_key=None):
         """从PDF提取表格并导出为Excel。
 
         Args:
@@ -89,6 +94,14 @@ class PDFToExcelConverter:
         if not OPENPYXL_AVAILABLE:
             result['message'] = "openpyxl 未安装！请执行: pip install openpyxl"
             return result
+
+        if extract_mode == "OCR提取":
+            if not REQUESTS_AVAILABLE:
+                result['message'] = "requests 未安装，无法使用 OCR 表格识别"
+                return result
+            if not api_key or not secret_key:
+                result['message'] = "已选择 OCR 提取，但未配置百度 OCR API Key/Secret Key"
+                return result
 
         if not input_file or not os.path.exists(input_file):
             result['message'] = "请先选择PDF文件！"
@@ -123,9 +136,6 @@ class PDFToExcelConverter:
 
             pages_to_process = e_idx - s_idx
 
-            # 构建表格提取参数
-            table_settings = self._build_table_settings(strategy)
-
             # 创建 Excel 工作簿
             wb = openpyxl.Workbook()
             # 移除默认Sheet（稍后按需创建）
@@ -150,8 +160,11 @@ class PDFToExcelConverter:
                     status_text=f"第 {page_num}/{total_pages} 页"
                 )
 
-                # 提取表格
-                tables = page.extract_tables(table_settings)
+                # 提取表格（结构 / OCR）
+                if extract_mode == "OCR提取":
+                    tables = self._extract_tables_ocr(page, api_key, secret_key)
+                else:
+                    tables = self._extract_tables(page, strategy)
 
                 if not tables:
                     continue
@@ -252,6 +265,8 @@ class PDFToExcelConverter:
                 "horizontal_strategy": "text",
                 "snap_tolerance": 5,
                 "join_tolerance": 5,
+                "text_tolerance": 2,
+                "intersection_tolerance": 5,
                 "min_words_vertical": 2,
                 "min_words_horizontal": 2,
             }
@@ -260,9 +275,174 @@ class PDFToExcelConverter:
             return {
                 "vertical_strategy": "lines",
                 "horizontal_strategy": "lines",
-                "snap_tolerance": 3,
-                "join_tolerance": 3,
+                "snap_tolerance": 4,
+                "join_tolerance": 4,
+                "intersection_tolerance": 5,
             }
+
+    def _extract_tables(self, page, strategy):
+        """按策略提取表格，自动检测会在行数偏少时回退到文本对齐。"""
+        if strategy == "文本对齐":
+            settings = self._build_table_settings("文本对齐")
+            return page.extract_tables(settings)
+
+        # 自动检测：先线条
+        line_settings = self._build_table_settings("自动检测")
+        line_tables = page.extract_tables(line_settings) or []
+        line_rows = self._count_rows(line_tables)
+
+        # 再文本对齐
+        text_settings = self._build_table_settings("文本对齐")
+        text_tables = page.extract_tables(text_settings) or []
+        text_rows = self._count_rows(text_tables)
+
+        if text_rows > line_rows:
+            return text_tables
+        return line_tables
+
+    @staticmethod
+    def _count_rows(tables):
+        count = 0
+        for table in tables:
+            if not table:
+                continue
+            for row in table:
+                if row is None:
+                    continue
+                if any(cell for cell in row):
+                    count += 1
+        return count
+
+    def _extract_tables_ocr(self, page, api_key, secret_key):
+        """使用 OCR 表格识别，返回二维表格列表。"""
+        client = BaiduOCRClient(api_key, secret_key)
+        try:
+            page_img = page.to_image(resolution=300).original
+            buf = io.BytesIO()
+            page_img.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
+        except Exception as e:
+            raise RuntimeError(f"无法渲染页面用于OCR: {e}")
+        result = client.recognize_table(img_bytes, return_excel=False, cell_contents=False)
+        tables = []
+        tables_result = result.get("tables_result", [])
+        for table in tables_result:
+            body = table.get("body", [])
+            grid = self._table_body_to_grid(body)
+            if grid:
+                grid = self._normalize_ocr_table(grid)
+            if grid:
+                tables.append(grid)
+        return tables
+
+    @staticmethod
+    def _table_body_to_grid(body):
+        if not body:
+            return []
+        max_row = 0
+        max_col = 0
+        for cell in body:
+            max_row = max(max_row, cell.get("row_end", 0))
+            max_col = max(max_col, cell.get("col_end", 0))
+        if max_row <= 0 or max_col <= 0:
+            return []
+        grid = [["" for _ in range(max_col)] for _ in range(max_row)]
+        for cell in body:
+            r = cell.get("row_start", 0) - 1
+            c = cell.get("col_start", 0) - 1
+            if r < 0 or c < 0:
+                continue
+            text = cell.get("words", "")
+            if grid[r][c]:
+                grid[r][c] = f"{grid[r][c]} {text}".strip()
+            else:
+                grid[r][c] = text
+        return grid
+
+    @staticmethod
+    def _normalize_ocr_table(grid):
+        """对 OCR 表格做表头识别 + 自动对齐。"""
+        if not grid:
+            return grid
+
+        header_idx, header = PDFToExcelConverter._find_header_row(grid)
+        if header_idx is None:
+            # 没找到表头，仍做空列裁剪
+            return PDFToExcelConverter._trim_empty_columns(grid)
+
+        # 仅保留表头及其后数据
+        data = grid[header_idx:]
+        data = PDFToExcelConverter._align_rows_to_header(data, len(header))
+        data = PDFToExcelConverter._trim_empty_columns(data)
+        return data
+
+    @staticmethod
+    def _find_header_row(grid):
+        keywords = ["班级", "学号", "姓名", "平时", "期中", "期末", "总评", "备注", "成绩"]
+        best_idx = None
+        best_score = 0
+        best_row = None
+        scan_rows = min(len(grid), 8)
+        for i in range(scan_rows):
+            row = grid[i]
+            if not row:
+                continue
+            text = " ".join(str(c) for c in row if c)
+            score = 0
+            for kw in keywords:
+                if kw in text:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_idx = i
+                best_row = row
+        if best_score >= 2:
+            return best_idx, best_row
+        return None, None
+
+    @staticmethod
+    def _align_rows_to_header(rows, header_len):
+        aligned = []
+        for row in rows:
+            if not row:
+                continue
+            # 去掉末尾空单元
+            while row and not str(row[-1]).strip():
+                row = row[:-1]
+            # 自动左移：如果前面空列过多
+            leading_empty = 0
+            for c in row:
+                if str(c).strip():
+                    break
+                leading_empty += 1
+            if leading_empty >= 1 and len(row) - leading_empty <= header_len:
+                row = row[leading_empty:]
+            # 统一列数
+            if len(row) < header_len:
+                row = row + [""] * (header_len - len(row))
+            elif len(row) > header_len:
+                row = row[:header_len]
+            aligned.append(row)
+        return aligned
+
+    @staticmethod
+    def _trim_empty_columns(grid):
+        if not grid:
+            return grid
+        col_count = max(len(r) for r in grid)
+        keep = []
+        for c in range(col_count):
+            has_value = False
+            for r in grid:
+                if c < len(r) and str(r[c]).strip():
+                    has_value = True
+                    break
+            if has_value:
+                keep.append(c)
+        trimmed = []
+        for r in grid:
+            trimmed.append([r[c] if c < len(r) else "" for c in keep])
+        return trimmed
 
     @staticmethod
     def _clean_table(table_data):

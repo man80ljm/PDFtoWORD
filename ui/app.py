@@ -31,6 +31,7 @@ from converters.pdf_compress import PDFCompressConverter, COMPRESS_PRESETS
 from converters.pdf_extract import PDFExtractConverter
 from converters.pdf_ocr import PDFOCRConverter
 from converters.pdf_to_excel import PDFToExcelConverter, TABLE_STRATEGIES
+from converters.pdf_batch_extract import PDFBatchExtractConverter
 
 try:
     from PIL import Image, ImageTk
@@ -47,7 +48,7 @@ except ImportError:
 
 
 # 所有支持的功能列表
-ALL_FUNCTIONS = ["PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF", "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel"]
+ALL_FUNCTIONS = ["PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF", "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取"]
 
 
 class PDFConverterApp:
@@ -150,6 +151,19 @@ class PDFConverterApp:
         self.allow_copy_var = tk.BooleanVar(value=True)
         self.allow_modify_var = tk.BooleanVar(value=False)
         self.allow_annotate_var = tk.BooleanVar(value=True)
+
+        # --- 批量文本/图片提取选项 ---
+        self.batch_text_enabled_var = tk.BooleanVar(value=True)
+        self.batch_image_enabled_var = tk.BooleanVar(value=True)
+        self.batch_text_format_var = tk.StringVar(value="txt")
+        self.batch_text_mode_var = tk.StringVar(value="合并为一个文件")
+        self.batch_preserve_layout_var = tk.BooleanVar(value=True)
+        self.batch_ocr_enabled_var = tk.BooleanVar(value=False)
+        self.batch_pages_var = tk.StringVar()
+        self.batch_image_per_page_var = tk.BooleanVar(value=False)
+        self.batch_image_dedupe_var = tk.BooleanVar(value=False)
+        self.batch_image_format_var = tk.StringVar(value="原格式")
+        self.batch_zip_enabled_var = tk.BooleanVar(value=False)
 
         # --- API 配置 ---
         self.api_provider = "baidu"
@@ -521,6 +535,7 @@ class PDFConverterApp:
         # PDF转Excel选项区 (y=210)
         self.excel_strategy_var = tk.StringVar(value='自动检测')
         self.excel_merge_var = tk.BooleanVar(value=False)
+        self.excel_extract_mode_var = tk.StringVar(value='结构提取')
         self.excel_options_frame = tk.Frame(self.panel_canvas)
         tk.Label(self.excel_options_frame, text="提取策略:",
                  font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
@@ -539,16 +554,102 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_excel_options, state='hidden')
 
-        # Excel策略说明 (y=245)
+        # Excel提取方式 (y=245)
+        self.excel_mode_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.excel_mode_frame, text="提取方式:",
+                 font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
+        tk.Radiobutton(
+            self.excel_mode_frame, text="结构提取",
+            variable=self.excel_extract_mode_var, value="结构提取",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Radiobutton(
+            self.excel_mode_frame, text="OCR提取",
+            variable=self.excel_extract_mode_var, value="OCR提取",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        self.cv_excel_mode = self.panel_canvas.create_window(
+            15, 245, window=self.excel_mode_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_excel_mode, state='hidden')
+
+        # Excel策略说明 (y=270)
         self.excel_hint_var = tk.StringVar(
             value=TABLE_STRATEGIES['自动检测']['description'])
         self.excel_hint_frame = tk.Frame(self.panel_canvas)
         tk.Label(self.excel_hint_frame, textvariable=self.excel_hint_var,
                  font=("Microsoft YaHei", 8), fg="#888888").pack(anchor=tk.W)
         self.cv_excel_hint = self.panel_canvas.create_window(
-            15, 245, window=self.excel_hint_frame, anchor="nw"
+            15, 270, window=self.excel_hint_frame, anchor="nw"
         )
         self.panel_canvas.itemconfigure(self.cv_excel_hint, state='hidden')
+
+        # PDF批量文本/图片提取选项 (y=210)
+        self.batch_options_frame = tk.Frame(self.panel_canvas)
+        tk.Checkbutton(self.batch_options_frame, text="文本",
+                       variable=self.batch_text_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Checkbutton(self.batch_options_frame, text="图片",
+                       variable=self.batch_image_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(self.batch_options_frame, text="格式:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        ttk.Combobox(
+            self.batch_options_frame, textvariable=self.batch_text_format_var,
+            values=["txt", "json", "csv"],
+            state='readonly', width=5, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Label(self.batch_options_frame, text="模式:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        ttk.Combobox(
+            self.batch_options_frame, textvariable=self.batch_text_mode_var,
+            values=["合并为一个文件", "每页一个文件"],
+            state='readonly', width=8, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_batch_options = self.panel_canvas.create_window(
+            15, 210, window=self.batch_options_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_batch_options, state='hidden')
+
+        # PDF批量文本/图片提取选项 (y=245)
+        self.batch_options2_frame = tk.Frame(self.panel_canvas)
+        tk.Checkbutton(self.batch_options2_frame, text="保留换行",
+                       variable=self.batch_preserve_layout_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(self.batch_options2_frame, text="无文本时OCR",
+                       variable=self.batch_ocr_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(self.batch_options2_frame, text="页码:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        tk.Entry(self.batch_options2_frame, textvariable=self.batch_pages_var,
+                 width=12, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Checkbutton(self.batch_options2_frame, text="按页文件夹",
+                       variable=self.batch_image_per_page_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(self.batch_options2_frame, text="图片去重",
+                       variable=self.batch_image_dedupe_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(self.batch_options2_frame, text="图片格式:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        ttk.Combobox(
+            self.batch_options2_frame, textvariable=self.batch_image_format_var,
+            values=["原格式", "PNG", "JPEG"],
+            state='readonly', width=6, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Checkbutton(self.batch_options2_frame, text="打包ZIP",
+                       variable=self.batch_zip_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(10, 0))
+        self.cv_batch_options2 = self.panel_canvas.create_window(
+            15, 245, window=self.batch_options2_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_batch_options2, state='hidden')
+
+        # 批量提取提示 (y=270)
+        self.cv_batch_hint = self.panel_canvas.create_text(
+            15, 270, text="页码格式示例：1,3,5-10（留空表示全部页）",
+            font=("Microsoft YaHei", 8), anchor="nw", fill="#888888"
+        )
+        self.panel_canvas.itemconfigure(self.cv_batch_hint, state='hidden')
 
         # API状态提示
         self.cv_api_hint = self.panel_canvas.create_text(
@@ -644,7 +745,11 @@ class PDFConverterApp:
         self.panel_canvas.coords(self.cv_extract_options, 15, 210)
         self.panel_canvas.coords(self.cv_extract_hint, 15, 245)
         self.panel_canvas.coords(self.cv_excel_options, 15, 210)
-        self.panel_canvas.coords(self.cv_excel_hint, 15, 245)
+        self.panel_canvas.coords(self.cv_excel_mode, 15, 245)
+        self.panel_canvas.coords(self.cv_excel_hint, 15, 270)
+        self.panel_canvas.coords(self.cv_batch_options, 15, 210)
+        self.panel_canvas.coords(self.cv_batch_options2, 15, 245)
+        self.panel_canvas.coords(self.cv_batch_hint, 15, 270)
         self.panel_canvas.coords(self.cv_api_hint, 15, 270)
         self.panel_canvas.coords(self.cv_progress_bar, 20, 290)
         self.panel_canvas.itemconfigure(self.cv_progress_bar, width=w - 40)
@@ -668,7 +773,9 @@ class PDFConverterApp:
                         self.cv_encrypt_options, self.cv_encrypt_perm,
                         self.cv_compress_options, self.cv_compress_hint,
                         self.cv_extract_options, self.cv_extract_hint,
-                        self.cv_excel_options, self.cv_excel_hint]:
+                        self.cv_excel_options, self.cv_excel_mode, self.cv_excel_hint,
+                        self.cv_batch_options, self.cv_batch_options2,
+                        self.cv_batch_hint]:
             self.panel_canvas.itemconfigure(cv_item, state='hidden')
 
         title_prefix = self.title_text_var.get().split(' - ')[0] if ' - ' in self.title_text_var.get() else self.title_text_var.get()
@@ -764,10 +871,21 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
             self.panel_canvas.itemconfigure(self.cv_range_frame, state='normal')
             self.panel_canvas.itemconfigure(self.cv_excel_options, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_excel_mode, state='normal')
             self.panel_canvas.itemconfigure(self.cv_excel_hint, state='normal')
             self.panel_canvas.itemconfigure(self.cv_section1, text="选择包含表格的PDF文件")
             self.panel_canvas.itemconfigure(self.cv_section2, text="页范围（可选）")
             self.root.title(f"{title_prefix} - PDF转Excel")
+
+        if func == "PDF批量文本/图片提取":
+            self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
+            self.panel_canvas.itemconfigure(self.cv_batch_options, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_batch_options2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_batch_hint, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件（可多选）")
+            self.panel_canvas.itemconfigure(self.cv_section2, text="批量提取选项")
+            self.root.title(f"{title_prefix} - PDF批量文本/图片提取")
 
         self.selected_file.set("")
         self.selected_files_list = []
@@ -931,7 +1049,7 @@ class PDFConverterApp:
         """多文件时显示排序按钮，否则隐藏"""
         func = self.current_function_var.get()
         show = (len(self.selected_files_list) > 1
-                and func in ("图片转PDF", "PDF合并", "PDF转Word", "PDF转图片"))
+                and func in ("图片转PDF", "PDF合并", "PDF转Word", "PDF转图片", "PDF批量文本/图片提取"))
         if show:
             self.order_btn.pack(side=tk.LEFT, padx=(10, 0), ipady=6)
         else:
@@ -982,7 +1100,7 @@ class PDFConverterApp:
     def browse_file(self):
         func = self.current_function_var.get()
 
-        if func in ("PDF转Word", "PDF转图片", "PDF合并"):
+        if func in ("PDF转Word", "PDF转图片", "PDF合并", "PDF批量文本/图片提取"):
             # 多选PDF文件
             filenames = filedialog.askopenfilenames(
                 title="选择PDF文件（可多选）",
@@ -1167,6 +1285,10 @@ class PDFConverterApp:
             if not self.selected_files_list:
                 messagebox.showwarning("提示", "请先选择文件！")
                 return
+            if func == "PDF批量文本/图片提取":
+                if not self.batch_text_enabled_var.get() and not self.batch_image_enabled_var.get():
+                    messagebox.showwarning("提示", "请至少选择文本或图片提取！")
+                    return
 
         for f in self.selected_files_list:
             if not os.path.exists(f):
@@ -1213,6 +1335,8 @@ class PDFConverterApp:
                 self._do_convert_ocr()
             elif func == "PDF转Excel":
                 self._do_convert_excel()
+            elif func == "PDF批量文本/图片提取":
+                self._do_convert_batch_extract()
         except Exception as e:
             logging.error(f"转换异常: {e}", exc_info=True)
             self.root.after(0, lambda: messagebox.showerror(
@@ -1334,6 +1458,70 @@ class PDFConverterApp:
                 err_detail = "\n".join(result['errors'][:10])
                 messagebox.showwarning("OCR识别警告",
                                        f"以下页面识别失败：\n{err_detail}")
+
+        self.root.after(0, _show)
+
+    # ----------------------------------------------------------
+    # PDF批量文本/图片提取
+    # ----------------------------------------------------------
+
+    def _do_convert_batch_extract(self):
+        converter = PDFBatchExtractConverter(
+            on_progress=self._simple_progress_callback
+        )
+
+        self.root.after(0, lambda: self.progress_bar.config(
+            mode='determinate', maximum=100, value=0))
+        self.start_time = time.time()
+
+        text_mode_val = self.batch_text_mode_var.get()
+        text_mode = "merge" if "合并" in text_mode_val else "per_page"
+
+        result = converter.convert(
+            files=list(self.selected_files_list),
+            pages_str=self.batch_pages_var.get().strip(),
+            extract_text=bool(self.batch_text_enabled_var.get()),
+            extract_images=bool(self.batch_image_enabled_var.get()),
+            text_format=self.batch_text_format_var.get(),
+            text_mode=text_mode,
+            preserve_layout=bool(self.batch_preserve_layout_var.get()),
+            ocr_enabled=bool(self.batch_ocr_enabled_var.get()),
+            api_key=self.baidu_api_key,
+            secret_key=self.baidu_secret_key,
+            image_per_page=bool(self.batch_image_per_page_var.get()),
+            image_dedupe=bool(self.batch_image_dedupe_var.get()),
+            image_format=self.batch_image_format_var.get(),
+            zip_output=bool(self.batch_zip_enabled_var.get()),
+        )
+
+        # 记录历史
+        self.history.add({
+            'function': 'PDF批量文本/图片提取',
+            'input_files': list(self.selected_files_list),
+            'output': result.get('output_dir', ''),
+            'success': result.get('success', False),
+            'message': result.get('message', ''),
+            'page_count': result.get('stats', {}).get('page_count', 0),
+        })
+
+        if not result.get('success'):
+            self.root.after(0, lambda: messagebox.showerror(
+                "批量提取失败", result.get('message', '未知错误')))
+            self.root.after(0, lambda: self.status_message.set("批量提取失败"))
+            return
+
+        output_dir = result.get('output_dir', '')
+        output_zip = result.get('output_zip', '')
+
+        def _show():
+            msg = (f"{result.get('message', '')}\n\n"
+                   f"输出目录：\n{output_dir}")
+            if output_zip:
+                msg += f"\n\n已生成ZIP：\n{output_zip}"
+            msg += "\n\n是否打开输出文件夹？"
+            if messagebox.askyesno("批量提取完成", msg):
+                self.open_folder(output_dir)
+            self.status_message.set("批量提取完成")
 
         self.root.after(0, _show)
 
@@ -1952,6 +2140,7 @@ class PDFConverterApp:
 
         strategy = self.excel_strategy_var.get()
         merge_sheets = self.excel_merge_var.get()
+        extract_mode = self.excel_extract_mode_var.get()
 
         result = converter.convert(
             input_file=input_file,
@@ -1959,6 +2148,9 @@ class PDFConverterApp:
             end_page=excel_end,
             strategy=strategy,
             merge_sheets=merge_sheets,
+            extract_mode=extract_mode,
+            api_key=self.baidu_api_key,
+            secret_key=self.baidu_secret_key,
         )
 
         # 记录历史
@@ -2294,6 +2486,21 @@ class PDFConverterApp:
             saved_page_size = data.get('page_size', 'A4')
             if saved_page_size in ("A4", "A3", "Letter", "Legal", "自适应"):
                 self.page_size_var.set(saved_page_size)
+            saved_excel_mode = data.get('excel_extract_mode', '结构提取')
+            if saved_excel_mode in ("结构提取", "OCR提取"):
+                self.excel_extract_mode_var.set(saved_excel_mode)
+            # 批量提取选项
+            self.batch_text_enabled_var.set(data.get('batch_text_enabled', True))
+            self.batch_image_enabled_var.set(data.get('batch_image_enabled', True))
+            self.batch_text_format_var.set(data.get('batch_text_format', 'txt'))
+            self.batch_text_mode_var.set(data.get('batch_text_mode', '合并为一个文件'))
+            self.batch_preserve_layout_var.set(data.get('batch_preserve_layout', True))
+            self.batch_ocr_enabled_var.set(data.get('batch_ocr_enabled', False))
+            self.batch_pages_var.set(data.get('batch_pages', ''))
+            self.batch_image_per_page_var.set(data.get('batch_image_per_page', False))
+            self.batch_image_dedupe_var.set(data.get('batch_image_dedupe', False))
+            self.batch_image_format_var.set(data.get('batch_image_format', '原格式'))
+            self.batch_zip_enabled_var.set(data.get('batch_zip_enabled', False))
             if self.bg_image_path:
                 self.apply_background_image()
             self._update_api_hint()
@@ -2315,6 +2522,18 @@ class PDFConverterApp:
             'image_format': self.image_format_var.get(),
             'split_mode': self.split_mode_var.get(),
             'page_size': self.page_size_var.get(),
+            'excel_extract_mode': self.excel_extract_mode_var.get(),
+            'batch_text_enabled': bool(self.batch_text_enabled_var.get()),
+            'batch_image_enabled': bool(self.batch_image_enabled_var.get()),
+            'batch_text_format': self.batch_text_format_var.get(),
+            'batch_text_mode': self.batch_text_mode_var.get(),
+            'batch_preserve_layout': bool(self.batch_preserve_layout_var.get()),
+            'batch_ocr_enabled': bool(self.batch_ocr_enabled_var.get()),
+            'batch_pages': self.batch_pages_var.get(),
+            'batch_image_per_page': bool(self.batch_image_per_page_var.get()),
+            'batch_image_dedupe': bool(self.batch_image_dedupe_var.get()),
+            'batch_image_format': self.batch_image_format_var.get(),
+            'batch_zip_enabled': bool(self.batch_zip_enabled_var.get()),
         }
         try:
             with open(self.settings_path, 'w', encoding='utf-8') as f:

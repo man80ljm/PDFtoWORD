@@ -1,5 +1,82 @@
 [
   {
+    "function": "PDF批量文本/图片提取",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_批量提取_20260211_011017",
+    "success": true,
+    "message": "批量提取完成！\n文件数: 1\n处理页数: 9\n文本页数: 0\n图片数量: 5\nOCR页数: 0",
+    "page_count": 9,
+    "timestamp": "2026-02-11 01:10:17"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_010755.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 2 个表格\n共 39 行数据",
+    "page_count": 2,
+    "timestamp": "2026-02-11 01:08:02"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_010735.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 2 个表格\n共 39 行数据",
+    "page_count": 2,
+    "timestamp": "2026-02-11 01:07:39"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_003106.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 1 个表格\n共 27 行数据",
+    "page_count": 1,
+    "timestamp": "2026-02-11 00:31:06"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_003044.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 1 个表格\n共 27 行数据",
+    "page_count": 1,
+    "timestamp": "2026-02-11 00:30:45"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_002704.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 1 个表格\n共 27 行数据",
+    "page_count": 1,
+    "timestamp": "2026-02-11 00:27:04"
+  },
+  {
+    "function": "PDF转Excel",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/23任选A(2025-2026-1摄影基础_3.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\23任选A(2025-2026-1摄影基础_3_表格_20260211_002602.xlsx",
+    "success": true,
+    "message": "提取完成！\n处理了 1 页，发现 2 个表格\n共 23 行数据",
+    "page_count": 2,
+    "timestamp": "2026-02-11 00:26:02"
+  },
+  {
     "function": "OCR可搜索PDF",
     "input_files": [
       "D:/pythonProject/PDFtoWORD/dist/识别测试.pdf"

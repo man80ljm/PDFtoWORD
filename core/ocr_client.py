@@ -53,6 +53,7 @@ class BaiduOCRClient:
     TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
     OCR_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic"
     FORMULA_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/formula"
+    TABLE_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/table"
 
     def __init__(self, api_key, secret_key):
         self.api_key = api_key
@@ -170,3 +171,27 @@ class BaiduOCRClient:
         if not formulas:
             logging.info(f'  No formulas found in response: {str(result)[:200]}')
         return formulas
+
+    def recognize_table(self, image_bytes, return_excel=False, cell_contents=False):
+        """表格识别，返回原始 JSON 结果"""
+        token = self._get_access_token()
+        compressed = self._compress_image(image_bytes, max_size_bytes=8 * 1024 * 1024)
+        img_b64 = base64.b64encode(compressed).decode()
+        logging.info(f'Table request: image base64 size = {len(img_b64)//1024} KB')
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        data = {
+            "image": img_b64,
+            "return_excel": "true" if return_excel else "false",
+            "cell_contents": "true" if cell_contents else "false",
+        }
+        resp = requests.post(
+            f"{self.TABLE_URL}?access_token={token}",
+            headers=headers, data=data, timeout=60
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        logging.info(f'Table response keys: {list(result.keys())}')
+        if "error_code" in result:
+            raise RuntimeError(f"表格识别失败[{result.get('error_code')}]: "
+                               f"{result.get('error_msg', result)}")
+        return result
