@@ -160,7 +160,9 @@ class PDFReorderConverter:
         if not pages_str or not pages_str.strip():
             return [], None
         pages = set()
-        text = pages_str.replace("，", ",").replace("；", ",").replace(";", ",")
+        text = (pages_str or "").strip()
+        text = text.replace("，", ",").replace("；", ",").replace("、", ",").replace(";", ",")
+        text = text.replace("～", "-").replace("~", "-").replace("—", "-").replace("–", "-")
         for part in text.split(","):
             part = part.strip()
             if not part:
@@ -191,7 +193,9 @@ class PDFReorderConverter:
     def _parse_reorder_sequence(self, pages_str, total_pages):
         if not pages_str or not pages_str.strip():
             return None, "Please enter full page order, e.g. 3,1,2,4-6"
-        text = pages_str.replace("，", ",").replace("；", ",").replace(";", ",")
+        text = (pages_str or "").strip()
+        text = text.replace("，", ",").replace("；", ",").replace("、", ",").replace(";", ",")
+        text = text.replace("～", "-").replace("~", "-").replace("—", "-").replace("–", "-")
         sequence = []
         for part in text.split(","):
             part = part.strip()

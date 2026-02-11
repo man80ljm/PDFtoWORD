@@ -34,6 +34,7 @@ from converters.pdf_ocr import PDFOCRConverter
 from converters.pdf_to_excel import PDFToExcelConverter, TABLE_STRATEGIES
 from converters.pdf_batch_extract import PDFBatchExtractConverter
 from converters.pdf_stamp_batch import PDFBatchStampConverter
+from converters.pdf_reorder import PDFReorderConverter
 
 try:
     from PIL import Image, ImageTk, ImageDraw
@@ -56,7 +57,12 @@ except ImportError:
 
 
 # 所有支持的功能列表
-ALL_FUNCTIONS = ["PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF", "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取", "PDF批量盖章"]
+ALL_FUNCTIONS = [
+    "PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF",
+    "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页",
+    "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取", "PDF批量盖章",
+    "PDF页面重排/旋转/倒序",
+]
 
 
 class PDFConverterApp:
@@ -176,6 +182,13 @@ class PDFConverterApp:
         self.batch_image_dedupe_var = tk.BooleanVar(value=False)
         self.batch_image_format_var = tk.StringVar(value="原格式")
         self.batch_zip_enabled_var = tk.BooleanVar(value=False)
+
+        # --- 页面重排/旋转/倒序选项 ---
+        self.reorder_mode_var = tk.StringVar(value="页面重排")
+        self.reorder_pages_var = tk.StringVar()
+        self.rotate_pages_var = tk.StringVar()
+        self.rotate_angle_var = tk.StringVar(value="90")
+        self.reorder_hint_var = tk.StringVar(value="")
 
         # --- 批量盖章选项 ---
         self.stamp_mode_var = tk.StringVar(value="普通章")
@@ -569,6 +582,66 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_extract_hint, state='hidden')
 
+        # PDF页面重排/旋转/倒序选项区 (y=210)
+        self.reorder_options_frame = tk.Frame(self.panel_canvas)
+        self.reorder_options_row1 = tk.Frame(self.reorder_options_frame)
+        self.reorder_options_row1.pack(anchor=tk.W)
+        self.reorder_options_row2 = tk.Frame(self.reorder_options_frame)
+        self.reorder_options_row2.pack(anchor=tk.W, pady=(6, 0))
+
+        tk.Label(self.reorder_options_row1, text="模式:",
+                 font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
+        self.reorder_mode_combo = ttk.Combobox(
+            self.reorder_options_row1, textvariable=self.reorder_mode_var,
+            values=["页面重排", "页面旋转", "页面倒序"],
+            state='readonly', width=8, font=("Microsoft YaHei", 9)
+        )
+        self.reorder_mode_combo.pack(side=tk.LEFT, padx=(6, 8))
+        self.reorder_mode_combo.bind("<<ComboboxSelected>>", self._on_reorder_mode_changed)
+
+        tk.Label(self.reorder_options_row1, text="顺序:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.reorder_pages_entry = tk.Entry(
+            self.reorder_options_row1, textvariable=self.reorder_pages_var,
+            width=16, font=("Microsoft YaHei", 9)
+        )
+        self.reorder_pages_entry.pack(side=tk.LEFT, padx=(4, 6))
+        self.reorder_preview_btn = tk.Button(
+            self.reorder_options_row1, text="顺序拖拽预览...",
+            command=self._open_reorder_preview_dialog,
+            font=("Microsoft YaHei", 8), cursor='hand2'
+        )
+        self.reorder_preview_btn.pack(side=tk.LEFT, padx=(0, 0))
+
+        tk.Label(self.reorder_options_row2, text="旋转页码:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.rotate_pages_entry = tk.Entry(
+            self.reorder_options_row2, textvariable=self.rotate_pages_var,
+            width=10, font=("Microsoft YaHei", 9)
+        )
+        self.rotate_pages_entry.pack(side=tk.LEFT, padx=(4, 6))
+        tk.Label(self.reorder_options_row2, text="角度:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.rotate_angle_combo = ttk.Combobox(
+            self.reorder_options_row2, textvariable=self.rotate_angle_var,
+            values=["90", "180", "270"],
+            state='readonly', width=4, font=("Microsoft YaHei", 9)
+        )
+        self.rotate_angle_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_reorder_options = self.panel_canvas.create_window(
+            15, 210, window=self.reorder_options_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_reorder_options, state='hidden')
+
+        # 页面处理提示 (y=278)
+        self.reorder_hint_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.reorder_hint_frame, textvariable=self.reorder_hint_var,
+                 font=("Microsoft YaHei", 8), fg="#888888").pack(anchor=tk.W)
+        self.cv_reorder_hint = self.panel_canvas.create_window(
+            15, 278, window=self.reorder_hint_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_reorder_hint, state='hidden')
+
         # PDF转Excel选项区 (y=210)
         self.excel_strategy_var = tk.StringVar(value='自动检测')
         self.excel_merge_var = tk.BooleanVar(value=False)
@@ -874,6 +947,8 @@ class PDFConverterApp:
         self.panel_canvas.coords(self.cv_compress_hint, 15, 245)
         self.panel_canvas.coords(self.cv_extract_options, 15, 210)
         self.panel_canvas.coords(self.cv_extract_hint, 15, 245)
+        self.panel_canvas.coords(self.cv_reorder_options, 15, 210)
+        self.panel_canvas.coords(self.cv_reorder_hint, 15, 278)
         self.panel_canvas.coords(self.cv_excel_options, 15, 210)
         self.panel_canvas.coords(self.cv_excel_mode, 15, 245)
         self.panel_canvas.coords(self.cv_excel_hint, 15, 270)
@@ -913,6 +988,7 @@ class PDFConverterApp:
                         self.cv_encrypt_options, self.cv_encrypt_perm,
                         self.cv_compress_options, self.cv_compress_hint,
                         self.cv_extract_options, self.cv_extract_hint,
+                        self.cv_reorder_options, self.cv_reorder_hint,
                         self.cv_excel_options, self.cv_excel_mode, self.cv_excel_hint,
                         self.cv_batch_options, self.cv_batch_options2, self.cv_batch_options3, self.cv_batch_hint,
                         self.cv_stamp_options, self.cv_stamp_options2, self.cv_stamp_options3, self.cv_stamp_options4, self.cv_stamp_hint]:
@@ -1006,6 +1082,20 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_section1, text="选择扫描版PDF文件")
             self.panel_canvas.itemconfigure(self.cv_section2, text="页范围（可选）")
             self.root.title(f"{title_prefix} - OCR可搜索PDF")
+
+        elif func == "PDF页面重排/旋转/倒序":
+            self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
+            self.panel_canvas.itemconfigure(self.cv_reorder_options, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_reorder_hint, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件")
+            self.panel_canvas.itemconfigure(self.cv_section2, text="页面处理选项")
+            self.progress_y = 315
+            self.progress_text_y = 350
+            self.btn_y = 395
+            self.dnd_y = 435
+            self._on_reorder_mode_changed()
+            self.root.title(f"{title_prefix} - PDF页面重排/旋转/倒序")
 
         elif func == "PDF转Excel":
             self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
@@ -1996,6 +2086,385 @@ class PDFConverterApp:
         self._update_stamp_preview_info()
         self.save_settings()
 
+    def _on_reorder_mode_changed(self, event=None):
+        mode = self.reorder_mode_var.get()
+        if mode == "页面重排":
+            self.reorder_pages_entry.config(state='normal')
+            self.reorder_preview_btn.config(state='normal')
+            self.rotate_pages_entry.config(state='disabled')
+            self.rotate_angle_combo.config(state='disabled')
+            self.reorder_hint_var.set(
+                "页面重排：填写完整顺序（如 3,1,2,4-6），或点击“顺序拖拽预览”直接拖拽生成。"
+            )
+        elif mode == "页面旋转":
+            self.reorder_pages_entry.config(state='disabled')
+            self.reorder_preview_btn.config(state='disabled')
+            self.rotate_pages_entry.config(state='normal')
+            self.rotate_angle_combo.config(state='readonly')
+            self.reorder_hint_var.set(
+                "页面旋转：页码支持 1,3,5-10，留空表示全部页。"
+            )
+        else:
+            self.reorder_pages_entry.config(state='disabled')
+            self.reorder_preview_btn.config(state='disabled')
+            self.rotate_pages_entry.config(state='disabled')
+            self.rotate_angle_combo.config(state='disabled')
+            self.reorder_hint_var.set("页面倒序：整本 PDF 按页倒序输出。")
+        self.save_settings()
+
+    def _open_reorder_preview_dialog(self):
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("提示", "顺序预览需要 Pillow 依赖。")
+            return
+        if not FITZ_UI_AVAILABLE:
+            messagebox.showwarning("提示", "顺序预览需要 PyMuPDF 依赖。")
+            return
+        if not self.selected_files_list:
+            messagebox.showwarning("提示", "请先选择一个 PDF 文件。")
+            return
+
+        pdf_path = self.selected_files_list[0]
+        if not (pdf_path and os.path.exists(pdf_path) and pdf_path.lower().endswith(".pdf")):
+            messagebox.showwarning("提示", "当前文件不是有效的 PDF。")
+            return
+
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            if total_pages <= 0:
+                doc.close()
+                messagebox.showwarning("提示", "该 PDF 没有页面。")
+                return
+
+            page_infos = []
+            for i in range(total_pages):
+                page = doc[i]
+                rect = page.rect
+                # 缩略图使用较低分辨率，保证弹窗流畅
+                pix = page.get_pixmap(matrix=fitz.Matrix(0.22, 0.22), alpha=False)
+                pil_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                page_infos.append({
+                    "page_idx": i,
+                    "size_text": f"{int(rect.width)}x{int(rect.height)}",
+                    "thumb": pil_img,
+                })
+            doc.close()
+        except Exception as exc:
+            messagebox.showerror("预览失败", f"读取 PDF 失败：\n{exc}")
+            return
+
+        # 初始顺序：优先使用输入框已有顺序，否则默认自然顺序
+        initial_order = list(range(total_pages))
+        text = (self.reorder_pages_var.get() or "").strip()
+        if text:
+            parser = PDFReorderConverter()
+            seq, err = parser._parse_reorder_sequence(text, total_pages)
+            if not err and seq:
+                initial_order = list(seq)
+
+        order = list(initial_order)
+        selected_page = tk.IntVar(value=order[0] if order else -1)
+        size_mode_var = tk.StringVar(value="中")
+        size_map = {"小": 110, "中": 150, "大": 190}
+        resized_cache = {}
+        card_boxes = {}
+        card_centers = []
+        drag_state = {"page_idx": None}
+        tk_refs = []
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("页面顺序拖拽预览")
+        dialog.geometry("650x600")
+        dialog.minsize(650, 600)
+        dialog.resizable(True, True)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text="拖拽或使用上下按钮调整顺序，点击“应用到重排页序”会自动回填。",
+            font=("Microsoft YaHei", 10),
+            fg="#666",
+        ).pack(anchor="w", padx=14, pady=(10, 6))
+
+        main_pane = tk.PanedWindow(
+            dialog,
+            orient=tk.VERTICAL,
+            sashrelief=tk.RAISED,
+            sashwidth=8,
+            bd=0,
+            bg="#d8d8d8",
+        )
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+
+        top_frame = tk.Frame(main_pane)
+        main_pane.add(top_frame, minsize=170)
+
+        table_wrap = tk.Frame(top_frame)
+        table_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tree = ttk.Treeview(table_wrap, columns=("page", "size"), show="headings", height=9)
+        tree.heading("page", text="页面")
+        tree.heading("size", text="尺寸")
+        tree.column("page", width=180, anchor="center")
+        tree.column("size", width=140, anchor="center")
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tree_scroll = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        btn_col = tk.Frame(top_frame)
+        btn_col.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
+
+        size_row = tk.Frame(btn_col)
+        size_row.pack(anchor="nw", pady=(0, 12))
+        tk.Label(size_row, text="缩略图:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        size_combo = ttk.Combobox(
+            size_row,
+            textvariable=size_mode_var,
+            values=["小", "中", "大"],
+            state="readonly",
+            width=4,
+            font=("Microsoft YaHei", 9),
+        )
+        size_combo.pack(side=tk.LEFT, padx=(6, 0))
+
+        def get_thumb(page_idx, target_h):
+            key = (page_idx, target_h)
+            if key in resized_cache:
+                return resized_cache[key]
+            base = page_infos[page_idx]["thumb"]
+            w = max(16, int(base.width * target_h / max(1, base.height)))
+            out = base.resize((w, target_h), Image.LANCZOS)
+            resized_cache[key] = out
+            return out
+
+        def refresh_tree():
+            selected = selected_page.get()
+            tree.delete(*tree.get_children())
+            for p in order:
+                iid = f"p{p}"
+                tree.insert("", tk.END, iid=iid, values=(f"第 {p + 1} 页", page_infos[p]["size_text"]))
+            if selected in order:
+                iid = f"p{selected}"
+                tree.selection_set(iid)
+                tree.see(iid)
+
+        preview_wrap = tk.Frame(main_pane)
+        main_pane.add(preview_wrap, minsize=150)
+        preview_canvas = tk.Canvas(preview_wrap, bg="#efefef", highlightthickness=1, highlightbackground="#c9c9c9")
+        preview_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        hbar = ttk.Scrollbar(preview_wrap, orient=tk.HORIZONTAL, command=preview_canvas.xview)
+        hbar.pack(side=tk.BOTTOM, fill=tk.X)
+        preview_canvas.configure(xscrollcommand=hbar.set)
+
+        def redraw_cards(keep_focus=True):
+            nonlocal tk_refs, card_boxes, card_centers
+            tk_refs = []
+            card_boxes = {}
+            card_centers = []
+            preview_canvas.delete("all")
+
+            base_target_h = size_map.get(size_mode_var.get(), 150)
+            canvas_h = max(1, preview_canvas.winfo_height())
+            if canvas_h > 120:
+                dynamic_cap = max(72, canvas_h - 90)
+                target_h = min(base_target_h, dynamic_cap)
+            else:
+                target_h = min(base_target_h, 110)
+            x = 18
+            y = 18
+            gap = 14
+            selected = selected_page.get()
+
+            for p in order:
+                img = get_thumb(p, target_h)
+                tw, th = img.size
+                tk_img = ImageTk.PhotoImage(img)
+                tk_refs.append(tk_img)
+
+                x1, y1 = x, y
+                x2, y2 = x + tw, y + th
+                card_fill = "#f6fbff" if p == selected else "#ffffff"
+                card_outline = "#2a91e8" if p == selected else "#d0d0d0"
+                preview_canvas.create_rectangle(x1 - 3, y1 - 3, x2 + 3, y2 + 28, fill=card_fill, outline=card_outline, width=2 if p == selected else 1)
+                preview_canvas.create_image(x, y, anchor="nw", image=tk_img)
+                preview_canvas.create_text((x1 + x2) / 2, y2 + 14, text=f"第 {p + 1} 页", font=("Microsoft YaHei", 9))
+
+                card_boxes[p] = (x1 - 3, y1 - 3, x2 + 3, y2 + 28)
+                card_centers.append((p, (x1 + x2) / 2))
+                x += tw + gap
+
+            total_w = max(x + 20, preview_canvas.winfo_width())
+            total_h = max(target_h + 70, preview_canvas.winfo_height())
+            preview_canvas.configure(scrollregion=(0, 0, total_w, total_h))
+            if keep_focus and selected in order:
+                try:
+                    c = next(c for pp, c in card_centers if pp == selected)
+                    vw = max(1, preview_canvas.winfo_width())
+                    left = max(0, c - vw / 2)
+                    right = max(1, total_w - vw)
+                    preview_canvas.xview_moveto(0 if right <= 0 else min(1.0, left / right))
+                except Exception:
+                    pass
+
+        def set_selected(page_idx):
+            if page_idx not in order:
+                return
+            selected_page.set(page_idx)
+            refresh_tree()
+            redraw_cards()
+
+        def page_from_canvas_xy(x, y):
+            px = preview_canvas.canvasx(x)
+            py = preview_canvas.canvasy(y)
+            for p in reversed(order):
+                b = card_boxes.get(p)
+                if not b:
+                    continue
+                x1, y1, x2, y2 = b
+                if x1 <= px <= x2 and y1 <= py <= y2:
+                    return p
+            return None
+
+        def reorder_selected(delta):
+            p = selected_page.get()
+            if p not in order:
+                return
+            idx = order.index(p)
+            ni = idx + delta
+            if ni < 0 or ni >= len(order):
+                return
+            order[idx], order[ni] = order[ni], order[idx]
+            refresh_tree()
+            redraw_cards()
+
+        def reset_order():
+            order.clear()
+            order.extend(range(total_pages))
+            selected_page.set(order[0] if order else -1)
+            refresh_tree()
+            redraw_cards(keep_focus=False)
+
+        tk.Button(btn_col, text="上移", width=10, font=("Microsoft YaHei", 10), command=lambda: reorder_selected(-1)).pack(anchor="nw", pady=(0, 8))
+        tk.Button(btn_col, text="下移", width=10, font=("Microsoft YaHei", 10), command=lambda: reorder_selected(1)).pack(anchor="nw", pady=(0, 8))
+        tk.Button(btn_col, text="重置顺序", width=10, font=("Microsoft YaHei", 10), command=reset_order).pack(anchor="nw")
+
+        def on_tree_select(_event=None):
+            cur = tree.selection()
+            if not cur:
+                return
+            iid = cur[0]
+            if iid.startswith("p"):
+                try:
+                    p = int(iid[1:])
+                except ValueError:
+                    return
+                selected_page.set(p)
+                redraw_cards()
+
+        def on_size_change(_event=None):
+            redraw_cards(keep_focus=False)
+
+        def on_canvas_press(event):
+            p = page_from_canvas_xy(event.x, event.y)
+            if p is None:
+                drag_state["page_idx"] = None
+                return
+            selected_page.set(p)
+            drag_state["page_idx"] = p
+            refresh_tree()
+            redraw_cards()
+
+        def on_canvas_drag(event):
+            p = drag_state.get("page_idx")
+            if p is None or p not in order:
+                return
+            x_abs = preview_canvas.canvasx(event.x)
+            cur_idx = order.index(p)
+            target_idx = cur_idx
+            for i, (_page, center_x) in enumerate(card_centers):
+                if x_abs < center_x:
+                    target_idx = i
+                    break
+            else:
+                target_idx = len(order) - 1
+            if target_idx != cur_idx:
+                order.pop(cur_idx)
+                order.insert(target_idx, p)
+                refresh_tree()
+                redraw_cards(keep_focus=False)
+
+        def on_canvas_release(_event):
+            drag_state["page_idx"] = None
+
+        def on_canvas_wheel(event):
+            step = -3 if event.delta > 0 else 3
+            preview_canvas.xview_scroll(step, "units")
+            return "break"
+
+        def on_canvas_wheel_linux(event):
+            step = -3 if event.num == 4 else 3
+            preview_canvas.xview_scroll(step, "units")
+            return "break"
+
+        def on_tree_wheel(event):
+            step = -2 if event.delta > 0 else 2
+            tree.yview_scroll(step, "units")
+            return "break"
+
+        def on_tree_wheel_linux(event):
+            step = -2 if event.num == 4 else 2
+            tree.yview_scroll(step, "units")
+            return "break"
+
+        resize_state = {"job": None}
+
+        def schedule_redraw(delay_ms=80, keep_focus=False):
+            if resize_state["job"] is not None:
+                try:
+                    dialog.after_cancel(resize_state["job"])
+                except Exception:
+                    pass
+            resize_state["job"] = dialog.after(delay_ms, lambda: redraw_cards(keep_focus=keep_focus))
+
+        def on_canvas_configure(_event=None):
+            schedule_redraw(delay_ms=80, keep_focus=True)
+
+        def apply_order():
+            if not order:
+                messagebox.showwarning("提示", "没有可应用的页序。", parent=dialog)
+                return
+            seq_text = ",".join(str(p + 1) for p in order)
+            self.reorder_mode_var.set("页面重排")
+            self.reorder_pages_var.set(seq_text)
+            self._on_reorder_mode_changed()
+            self.status_message.set("已回填页面重排序列")
+            dialog.destroy()
+
+        bottom_btns = tk.Frame(dialog)
+        bottom_btns.pack(fill=tk.X, padx=12, pady=(0, 10))
+        tk.Button(bottom_btns, text="取消", width=10, font=("Microsoft YaHei", 10), command=dialog.destroy).pack(side=tk.RIGHT)
+        tk.Button(bottom_btns, text="应用到重排页序", width=14, font=("Microsoft YaHei", 10, "bold"), command=apply_order).pack(side=tk.RIGHT, padx=(0, 8))
+
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+        size_combo.bind("<<ComboboxSelected>>", on_size_change)
+        tree.bind("<MouseWheel>", on_tree_wheel)
+        tree.bind("<Button-4>", on_tree_wheel_linux)
+        tree.bind("<Button-5>", on_tree_wheel_linux)
+        preview_canvas.bind("<ButtonPress-1>", on_canvas_press)
+        preview_canvas.bind("<B1-Motion>", on_canvas_drag)
+        preview_canvas.bind("<ButtonRelease-1>", on_canvas_release)
+        preview_canvas.bind("<MouseWheel>", on_canvas_wheel)
+        preview_canvas.bind("<Button-4>", on_canvas_wheel_linux)
+        preview_canvas.bind("<Button-5>", on_canvas_wheel_linux)
+        preview_canvas.bind("<Configure>", on_canvas_configure)
+
+        refresh_tree()
+        redraw_cards(keep_focus=False)
+        dialog.after(80, lambda: main_pane.sash_place(0, 0, 260))
+
     def _on_split_mode_changed(self, event=None):
         mode = self.split_mode_var.get()
         if mode == "每页一个PDF":
@@ -2257,7 +2726,7 @@ class PDFConverterApp:
                         names += f" 等共{count}个"
                     self.status_message.set(f"已选择: {names}")
 
-        elif func in ("PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel"):
+        elif func in ("PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF页面重排/旋转/倒序"):
             # 单选PDF
             filename = filedialog.askopenfilename(
                 title="选择PDF文件",
@@ -2324,6 +2793,9 @@ class PDFConverterApp:
                 self.status_message.set("拖拽的文件中没有PDF文件")
                 return
 
+        if func == "PDF页面重排/旋转/倒序" and len(valid) > 1:
+            valid = [valid[0]]
+
         self.selected_files_list = valid
         count = len(valid)
         if count == 1:
@@ -2379,6 +2851,22 @@ class PDFConverterApp:
                 if mode_key == "template" and not self.stamp_template_path:
                     messagebox.showwarning("提示", "请先选择模板JSON。")
                     return
+            if func == "PDF页面重排/旋转/倒序":
+                if len(self.selected_files_list) > 1:
+                    messagebox.showwarning("提示", "该功能一次只处理一个PDF，请只保留一个文件。")
+                    return
+                mode = self.reorder_mode_var.get()
+                if mode == "页面重排" and not self.reorder_pages_var.get().strip():
+                    messagebox.showwarning("提示", "页面重排模式需要填写完整页序，或点击“顺序拖拽预览”。")
+                    return
+                if mode == "页面旋转":
+                    try:
+                        angle = int(self.rotate_angle_var.get())
+                    except Exception:
+                        angle = 0
+                    if angle not in (90, 180, 270):
+                        messagebox.showwarning("提示", "旋转角度仅支持 90 / 180 / 270。")
+                        return
 
         for f in self.selected_files_list:
             if not os.path.exists(f):
@@ -2429,6 +2917,8 @@ class PDFConverterApp:
                 self._do_convert_batch_extract()
             elif func == "PDF批量盖章":
                 self._do_convert_batch_stamp()
+            elif func == "PDF页面重排/旋转/倒序":
+                self._do_convert_reorder()
         except Exception as e:
             logging.error(f"转换异常: {e}", exc_info=True)
             self.root.after(0, lambda: messagebox.showerror(
@@ -2927,6 +3417,70 @@ class PDFConverterApp:
             except Exception:
                 pass
             self.status_message.set(f"拆分完成: {file_count}个文件")
+
+        self.root.after(0, _show)
+
+    # ----------------------------------------------------------
+    # PDF 页面重排 / 旋转 / 倒序
+    # ----------------------------------------------------------
+
+    def _do_convert_reorder(self):
+        converter = PDFReorderConverter(
+            on_progress=self._simple_progress_callback
+        )
+
+        self.root.after(0, lambda: self.progress_bar.config(
+            mode='determinate', maximum=100, value=0))
+        self.start_time = time.time()
+
+        input_file = self.selected_files_list[0]
+        mode_text = self.reorder_mode_var.get()
+        mode_map = {
+            "页面重排": "reorder",
+            "页面旋转": "rotate",
+            "页面倒序": "reverse",
+        }
+        mode = mode_map.get(mode_text, "reorder")
+
+        try:
+            rotate_angle = int(self.rotate_angle_var.get())
+        except Exception:
+            rotate_angle = 90
+
+        result = converter.convert(
+            input_file=input_file,
+            mode=mode,
+            reorder_pages=self.reorder_pages_var.get().strip(),
+            rotate_pages=self.rotate_pages_var.get().strip(),
+            rotate_angle=rotate_angle,
+        )
+
+        self.history.add({
+            'function': f'PDF{mode_text}',
+            'input_files': [input_file],
+            'output': result.get('output_file', ''),
+            'success': result.get('success', False),
+            'message': result.get('message', ''),
+            'page_count': result.get('page_count', 0),
+        })
+
+        if not result.get('success'):
+            self.root.after(0, lambda: messagebox.showerror(
+                f"{mode_text}失败", result.get('message', '未知错误')))
+            self.root.after(0, lambda: self.status_message.set(f"{mode_text}失败"))
+            return
+
+        output_file = result.get('output_file', '')
+        page_count = result.get('page_count', 0)
+
+        def _show():
+            msg = (f"{mode_text}完成！\n\n"
+                   f"处理页数：{page_count}\n\n"
+                   f"保存位置：\n{output_file}\n\n"
+                   f"是否打开文件所在文件夹？")
+            if messagebox.askyesno(f"{mode_text}完成", msg):
+                self.open_folder(output_file)
+            self.status_message.set(f"{mode_text}完成")
 
         self.root.after(0, _show)
 
@@ -3653,6 +4207,15 @@ class PDFConverterApp:
             saved_split = data.get('split_mode', '每页一个PDF')
             if saved_split in ("每页一个PDF", "每N页一个PDF", "按范围拆分"):
                 self.split_mode_var.set(saved_split)
+            saved_reorder_mode = data.get('reorder_mode', '页面重排')
+            if saved_reorder_mode in ("页面重排", "页面旋转", "页面倒序"):
+                self.reorder_mode_var.set(saved_reorder_mode)
+            self.reorder_pages_var.set(data.get('reorder_pages', ''))
+            self.rotate_pages_var.set(data.get('rotate_pages', ''))
+            saved_rotate_angle = str(data.get('rotate_angle', '90'))
+            if saved_rotate_angle not in ("90", "180", "270"):
+                saved_rotate_angle = "90"
+            self.rotate_angle_var.set(saved_rotate_angle)
             saved_page_size = data.get('page_size', 'A4')
             if saved_page_size in ("A4", "A3", "Letter", "Legal", "自适应"):
                 self.page_size_var.set(saved_page_size)
@@ -3724,6 +4287,7 @@ class PDFConverterApp:
                 self.stamp_template_label.config(text=nm2 if len(nm2) <= 16 else nm2[:13] + "...")
             if self.bg_image_path:
                 self.apply_background_image()
+            self._on_reorder_mode_changed()
             self._on_stamp_mode_changed()
             self._update_stamp_preview_info()
             self._update_api_hint()
@@ -3744,6 +4308,10 @@ class PDFConverterApp:
             'image_dpi': self.image_dpi_var.get(),
             'image_format': self.image_format_var.get(),
             'split_mode': self.split_mode_var.get(),
+            'reorder_mode': self.reorder_mode_var.get(),
+            'reorder_pages': self.reorder_pages_var.get(),
+            'rotate_pages': self.rotate_pages_var.get(),
+            'rotate_angle': self.rotate_angle_var.get(),
             'page_size': self.page_size_var.get(),
             'excel_extract_mode': self.excel_extract_mode_var.get(),
             'batch_text_enabled': bool(self.batch_text_enabled_var.get()),
