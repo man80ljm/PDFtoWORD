@@ -26,20 +26,41 @@
   "batch_zip_enabled": false,
   "stamp_mode": "骑缝章",
   "stamp_pages": "",
-  "stamp_opacity": "0.85",
+  "stamp_opacity": "0.88",
   "stamp_position": "左上",
   "stamp_size_ratio": "0.18",
-  "stamp_qr_text": "",
+  "stamp_qr_text": "90分",
   "stamp_seam_side": "右侧",
   "stamp_seam_align": "居中",
   "stamp_seam_overlap": "0.25",
   "stamp_remove_white_bg": true,
   "stamp_preview_profile": {
-    "x_ratio": 0.85,
-    "y_ratio": 0.85,
-    "size_ratio": 0.18,
-    "opacity": 0.85
+    "x_ratio": 0.9293201133144476,
+    "y_ratio": 0.948,
+    "size_ratio": 0.1,
+    "opacity": 0.88
   },
-  "stamp_image_path": "D:/pythonProject/PDFtoWORD/dist/公章.png",
+  "stamp_image_paths": [
+    "D:\\pythonProject\\PDFtoWORD\\dist\\公章.png",
+    "D:\\pythonProject\\PDFtoWORD\\dist\\公章2.jpg"
+  ],
+  "stamp_selected_image_idx": 1,
+  "stamp_profiles": {
+    "D:\\pythonProject\\PDFtoWORD\\dist\\公章.png": {
+      "enabled": true,
+      "x_ratio": 0.8245042492917848,
+      "y_ratio": 0.864,
+      "size_ratio": 0.19,
+      "opacity": 0.61
+    },
+    "D:\\pythonProject\\PDFtoWORD\\dist\\公章2.jpg": {
+      "enabled": true,
+      "x_ratio": 0.42790368271954676,
+      "y_ratio": 0.832,
+      "size_ratio": 0.27,
+      "opacity": 0.88
+    }
+  },
+  "stamp_image_path": "D:\\pythonProject\\PDFtoWORD\\dist\\公章2.jpg",
   "stamp_template_path": ""
 }

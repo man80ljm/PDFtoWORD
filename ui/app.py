@@ -184,6 +184,9 @@ class PDFConverterApp:
         self.stamp_position_var = tk.StringVar(value="右下")
         self.stamp_size_ratio_var = tk.StringVar(value="0.18")
         self.stamp_image_path = ""
+        self.stamp_image_paths = []
+        self.stamp_selected_image_idx = 0
+        self.stamp_profiles = {}
         self.stamp_qr_text_var = tk.StringVar()
         self.stamp_seam_side_var = tk.StringVar(value="右侧")
         self.stamp_seam_align_var = tk.StringVar(value="居中")
@@ -694,7 +697,7 @@ class PDFConverterApp:
         )
         self.stamp_mode_combo.pack(side=tk.LEFT, padx=(6, 8))
         self.stamp_mode_combo.bind("<<ComboboxSelected>>", self._on_stamp_mode_changed)
-        tk.Button(self.stamp_options_frame, text="章图...",
+        tk.Button(self.stamp_options_frame, text="章图(多选)...",
                   font=("Microsoft YaHei", 8), command=self._choose_stamp_image,
                   cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
         self.stamp_image_label = tk.Label(self.stamp_options_frame, text="",
@@ -1052,15 +1055,139 @@ class PDFConverterApp:
         self._update_api_hint()
         self.save_settings()
 
+    def _default_stamp_profile(self):
+        base = self.stamp_preview_profile or {}
+        return {
+            "enabled": True,
+            "x_ratio": self._clamp_value(base.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+            "y_ratio": self._clamp_value(base.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+            "size_ratio": self._clamp_value(base.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
+            "opacity": self._clamp_value(base.get("opacity", 0.85), 0.05, 1.0, 0.85),
+        }
+
+    def _normalize_stamp_profile(self, profile):
+        data = dict(profile or {})
+        default = self._default_stamp_profile()
+        return {
+            "enabled": bool(data.get("enabled", default["enabled"])),
+            "x_ratio": self._clamp_value(data.get("x_ratio", default["x_ratio"]), 0.0, 1.0, default["x_ratio"]),
+            "y_ratio": self._clamp_value(data.get("y_ratio", default["y_ratio"]), 0.0, 1.0, default["y_ratio"]),
+            "size_ratio": self._clamp_value(data.get("size_ratio", default["size_ratio"]), 0.03, 0.7, default["size_ratio"]),
+            "opacity": self._clamp_value(data.get("opacity", default["opacity"]), 0.05, 1.0, default["opacity"]),
+        }
+
+    def _set_stamp_images(self, paths, selected_idx=None):
+        cleaned = []
+        seen = set()
+        for p in paths or []:
+            if not p:
+                continue
+            full = os.path.abspath(str(p))
+            if not os.path.exists(full):
+                continue
+            ext = os.path.splitext(full)[1].lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".bmp"):
+                continue
+            if full in seen:
+                continue
+            seen.add(full)
+            cleaned.append(full)
+
+        old_profiles = dict(self.stamp_profiles or {})
+        self.stamp_profiles = {}
+        for full in cleaned:
+            self.stamp_profiles[full] = self._normalize_stamp_profile(old_profiles.get(full))
+
+        self.stamp_image_paths = cleaned
+        if not cleaned:
+            self.stamp_selected_image_idx = 0
+            self.stamp_image_path = ""
+            self._update_stamp_image_label()
+            return
+
+        if selected_idx is None:
+            prev = self.stamp_image_path if self.stamp_image_path in cleaned else None
+            if prev:
+                idx = cleaned.index(prev)
+            else:
+                idx = min(max(int(self.stamp_selected_image_idx or 0), 0), len(cleaned) - 1)
+        else:
+            idx = min(max(int(selected_idx), 0), len(cleaned) - 1)
+
+        self.stamp_selected_image_idx = idx
+        self.stamp_image_path = cleaned[idx]
+        self._update_stamp_image_label()
+
+    def _get_stamp_profile_for_path(self, image_path):
+        if not image_path:
+            return self._default_stamp_profile()
+        existing = self.stamp_profiles.get(image_path)
+        if existing is None:
+            existing = self._default_stamp_profile()
+            self.stamp_profiles[image_path] = existing
+        else:
+            existing = self._normalize_stamp_profile(existing)
+            self.stamp_profiles[image_path] = existing
+        return existing
+
+    def _get_enabled_stamp_profiles(self):
+        profiles = []
+        for path in self.stamp_image_paths or []:
+            if not path or not os.path.exists(path):
+                continue
+            prof = self._get_stamp_profile_for_path(path)
+            if not prof.get("enabled", True):
+                continue
+            profiles.append({
+                "image_path": path,
+                "enabled": True,
+                "x_ratio": prof["x_ratio"],
+                "y_ratio": prof["y_ratio"],
+                "size_ratio": prof["size_ratio"],
+                "opacity": prof["opacity"],
+            })
+        return profiles
+
+    def _update_stamp_image_label(self):
+        count = len(self.stamp_image_paths or [])
+        if count <= 0:
+            self.stamp_image_label.config(text="")
+            return
+        active = self._get_active_stamp_image_path()
+        if not active:
+            self.stamp_image_label.config(text=f"{count}个章图")
+            return
+        name = os.path.basename(active)
+        short = name if len(name) <= 12 else name[:9] + "..."
+        if count == 1:
+            self.stamp_image_label.config(text=short)
+        else:
+            self.stamp_image_label.config(text=f"{count}个章图 | {short}")
+
+    def _get_active_stamp_image_path(self):
+        if self.stamp_image_paths:
+            valid = [p for p in self.stamp_image_paths if os.path.exists(p)]
+            if valid != self.stamp_image_paths:
+                self.stamp_image_paths = valid
+            if self.stamp_image_paths:
+                idx = min(max(int(self.stamp_selected_image_idx or 0), 0), len(self.stamp_image_paths) - 1)
+                self.stamp_selected_image_idx = idx
+                self.stamp_image_path = self.stamp_image_paths[idx]
+                return self.stamp_image_path
+        if self.stamp_image_path and os.path.exists(self.stamp_image_path):
+            self.stamp_image_paths = [self.stamp_image_path]
+            self.stamp_selected_image_idx = 0
+            return self.stamp_image_path
+        self.stamp_image_path = ""
+        return ""
+
     def _choose_stamp_image(self):
-        filename = filedialog.askopenfilename(
-            title="选择章图",
+        filenames = filedialog.askopenfilenames(
+            title="选择章图（可多选）",
             filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp"), ("所有文件", "*.*")]
         )
-        if filename:
-            self.stamp_image_path = filename
-            name = os.path.basename(filename)
-            self.stamp_image_label.config(text=name if len(name) <= 16 else name[:13] + "...")
+        if filenames:
+            self._set_stamp_images(list(filenames), selected_idx=0)
             self._update_stamp_preview_info()
             self.save_settings()
 
@@ -1102,13 +1229,23 @@ class PDFConverterApp:
         profile = self.stamp_preview_profile or {}
         x_ratio = self._clamp_value(profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85)
         y_ratio = self._clamp_value(profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85)
+        size_ratio = self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18)
         opacity = self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85)
+        active_path = self._get_active_stamp_image_path()
+        image_name = os.path.basename(active_path) if active_path else ""
+        image_suffix = f" | {image_name}" if image_name else ""
+        enabled_count = len(self._get_enabled_stamp_profiles()) if mode_key in ("seal", "seam") else 0
+        enabled_suffix = f" | 已启用{enabled_count}" if enabled_count > 0 else ""
         if mode_key == "seam":
-            self.stamp_preview_info_var.set(f"骑缝预览透明度 {opacity:.2f}")
+            self.stamp_preview_info_var.set(
+                f"骑缝预览 透明度 {opacity:.2f} 尺寸 {size_ratio:.2f}{image_suffix}{enabled_suffix}"
+            )
         elif mode_key == "template":
-            self.stamp_preview_info_var.set(f"模板预览透明度 {opacity:.2f}")
+            self.stamp_preview_info_var.set(f"模板预览 透明度 {opacity:.2f}")
         else:
-            self.stamp_preview_info_var.set(f"位置({x_ratio:.2f},{y_ratio:.2f}) 透明度 {opacity:.2f}")
+            self.stamp_preview_info_var.set(
+                f"位置({x_ratio:.2f},{y_ratio:.2f}) 透明度 {opacity:.2f} 尺寸 {size_ratio:.2f}{image_suffix}{enabled_suffix}"
+            )
 
     def _resolve_preview_pdf(self):
         if self.selected_files_list:
@@ -1169,7 +1306,8 @@ class PDFConverterApp:
             return
 
         mode_key = self._get_stamp_mode_key()
-        if mode_key in ("seal", "seam") and not (self.stamp_image_path and os.path.exists(self.stamp_image_path)):
+        active_stamp_path = self._get_active_stamp_image_path()
+        if mode_key in ("seal", "seam") and not active_stamp_path:
             messagebox.showwarning("提示", "请先选择章图。")
             return
         if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
@@ -1191,11 +1329,8 @@ class PDFConverterApp:
                 messagebox.showwarning("提示", "该PDF没有可预览的页面。")
                 return
             first_page = doc[0]
-            page_rect = first_page.rect
-            page_width_pt = float(page_rect.width)
-            page_height_pt = float(page_rect.height)
             page_count = len(doc)
-            pix = first_page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            pix = first_page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
             page_image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
             doc.close()
         except Exception as exc:
@@ -1206,30 +1341,35 @@ class PDFConverterApp:
         scale = min(max_w / page_image.width, max_h / page_image.height, 1.0)
         disp_w = max(1, int(page_image.width * scale))
         disp_h = max(1, int(page_image.height * scale))
-        if scale < 0.999:
-            page_display = page_image.resize((disp_w, disp_h), Image.LANCZOS)
-        else:
-            page_display = page_image.copy()
+        page_display = page_image.resize((disp_w, disp_h), Image.LANCZOS) if scale < 0.999 else page_image.copy()
+        pad = 24
 
-        profile = {
-            "x_ratio": self._clamp_value(self.stamp_preview_profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
-            "y_ratio": self._clamp_value(self.stamp_preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
-            "size_ratio": self._clamp_value(self.stamp_preview_profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
-            "opacity": self._clamp_value(self.stamp_preview_profile.get("opacity", 0.85), 0.05, 1.0, 0.85),
-        }
-        pad = 30
-        state = {
-            "dragging": False,
-            "drag_offset_x": 0.0,
-            "drag_offset_y": 0.0,
-            "stamp_bbox": None,
-            "page_tk": None,
-            "stamp_tk": None,
-        }
+        preview_paths = []
+        if mode_key in ("seal", "seam"):
+            preview_paths = [p for p in (self.stamp_image_paths or []) if p and os.path.exists(p)]
+            if active_stamp_path and active_stamp_path not in preview_paths:
+                preview_paths.append(active_stamp_path)
+            if not preview_paths:
+                messagebox.showwarning("提示", "没有可用的章图。")
+                return
+
+        preview_profiles = {}
+        if mode_key in ("seal", "seam"):
+            for p in preview_paths:
+                preview_profiles[p] = self._normalize_stamp_profile(self._get_stamp_profile_for_path(p))
+        else:
+            preview_profiles["__single__"] = self._normalize_stamp_profile(self.stamp_preview_profile)
 
         preview_win = tk.Toplevel(self.root)
         preview_win.title("盖章预览")
-        preview_win.geometry("920x720")
+        win_w = max(960, disp_w + 160)
+        win_h = max(760, disp_h + 300)
+        screen_w = max(1000, self.root.winfo_screenwidth())
+        screen_h = max(800, self.root.winfo_screenheight())
+        win_w = min(win_w, screen_w - 80)
+        win_h = min(win_h, screen_h - 80)
+        preview_win.geometry(f"{int(win_w)}x{int(win_h)}")
+        preview_win.minsize(920, 700)
         preview_win.resizable(False, False)
         preview_win.transient(self.root)
         preview_win.grab_set()
@@ -1238,24 +1378,35 @@ class PDFConverterApp:
         tk.Label(preview_win, text=info_text, font=("Microsoft YaHei", 9), fg="#666").pack(anchor="w", padx=12, pady=(10, 4))
 
         control_frame = tk.Frame(preview_win)
-        control_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+        control_frame.pack(fill=tk.X, padx=12, pady=(0, 6))
         tk.Label(control_frame, text="透明度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
-        opacity_var = tk.DoubleVar(value=profile["opacity"] * 100.0)
-        opacity_scale = tk.Scale(
-            control_frame,
-            from_=5,
-            to=100,
-            orient=tk.HORIZONTAL,
-            resolution=1,
-            showvalue=True,
-            variable=opacity_var,
-            length=240,
-        )
+        opacity_var = tk.DoubleVar(value=85)
+        opacity_scale = tk.Scale(control_frame, from_=5, to=100, orient=tk.HORIZONTAL, resolution=1, showvalue=True, variable=opacity_var, length=220)
         opacity_scale.pack(side=tk.LEFT, padx=(6, 12))
-        tk.Label(control_frame, text="拖动预览章图可调整位置（普通章/二维码）", font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.LEFT)
+        tk.Label(control_frame, text="缩放:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        size_var = tk.DoubleVar(value=18)
+        size_scale = tk.Scale(control_frame, from_=3, to=70, orient=tk.HORIZONTAL, resolution=1, showvalue=True, variable=size_var, length=200)
+        size_scale.pack(side=tk.LEFT, padx=(6, 12))
+        if mode_key == "seam":
+            size_scale.config(state=tk.DISABLED)
+        tk.Label(control_frame, text="勾选=参与输出，单击图章=当前编辑", font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.LEFT)
+
+        active_path_var = tk.StringVar(value=(active_stamp_path if active_stamp_path in preview_paths else (preview_paths[0] if preview_paths else "")))
+        enabled_vars = {}
+        if mode_key in ("seal", "seam"):
+            list_frame = tk.LabelFrame(preview_win, text="章图列表", font=("Microsoft YaHei", 9))
+            list_frame.pack(fill=tk.X, padx=12, pady=(0, 6))
+            for p in preview_paths:
+                row = tk.Frame(list_frame)
+                row.pack(fill=tk.X, pady=1)
+                ev = tk.BooleanVar(value=bool(preview_profiles[p].get("enabled", True)))
+                enabled_vars[p] = ev
+                tk.Checkbutton(row, variable=ev, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+                tk.Radiobutton(row, variable=active_path_var, value=p, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(2, 4))
+                tk.Label(row, text=os.path.basename(p), font=("Microsoft YaHei", 9), anchor="w").pack(side=tk.LEFT)
 
         canvas_frame = tk.Frame(preview_win, bg="#f5f5f5")
-        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        canvas_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=8)
         canvas = tk.Canvas(
             canvas_frame,
             width=disp_w + pad * 2,
@@ -1266,157 +1417,337 @@ class PDFConverterApp:
         )
         canvas.pack(fill=tk.BOTH, expand=True)
 
-        def build_stamp_image(opacity):
-            if mode_key == "seal":
-                image = Image.open(self.stamp_image_path).convert("RGBA")
-                if self.stamp_remove_white_bg_var.get():
-                    image = PDFBatchStampConverter._remove_white_background(image)
-                return PDFBatchStampConverter._apply_alpha(image, opacity)
-            if mode_key == "qr":
-                try:
-                    qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
-                        self.stamp_qr_text_var.get().strip(),
-                        opacity=opacity,
-                        remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
-                    )
-                    return Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
-                except Exception:
-                    return None
-            if mode_key == "seam":
-                image = Image.open(self.stamp_image_path).convert("RGBA")
-                if self.stamp_remove_white_bg_var.get():
-                    image = PDFBatchStampConverter._remove_white_background(image)
-                image = PDFBatchStampConverter._apply_alpha(image, opacity)
+        page_tk = ImageTk.PhotoImage(page_display)
+        canvas.create_image(pad, pad, anchor="nw", image=page_tk)
+        canvas.page_tk = page_tk
+        canvas.create_rectangle(pad, pad, pad + disp_w, pad + disp_h, outline="#bbbbbb")
+
+        state = {
+            "render_job": None,
+            "suspend_slider": False,
+            "drag_path": None,
+            "drag_offset_x": 0.0,
+            "drag_offset_y": 0.0,
+            "stamp_items": {},
+            "selection_rect": canvas.create_rectangle(0, 0, 0, 0, outline="#1e88e5", width=2, dash=(4, 2), state="hidden"),
+        }
+        image_cache = {}
+        render_cache = {}
+
+        def get_active_key():
+            if mode_key in ("seal", "seam"):
+                key = active_path_var.get()
+                if key not in preview_paths and preview_paths:
+                    key = preview_paths[0]
+                    active_path_var.set(key)
+                return key
+            return "__single__"
+
+        def get_profile(key):
+            if key not in preview_profiles:
+                preview_profiles[key] = self._default_stamp_profile()
+            return preview_profiles[key]
+
+        def sync_sliders_from_active():
+            key = get_active_key()
+            profile = get_profile(key)
+            state["suspend_slider"] = True
+            opacity_var.set(profile["opacity"] * 100.0)
+            size_var.set(profile["size_ratio"] * 100.0)
+            state["suspend_slider"] = False
+
+        def get_base_image(path):
+            cache_key = (path, bool(self.stamp_remove_white_bg_var.get()))
+            if cache_key in image_cache:
+                return image_cache[cache_key]
+            img = Image.open(path).convert("RGBA")
+            if self.stamp_remove_white_bg_var.get():
+                img = PDFBatchStampConverter._remove_white_background(img)
+            image_cache[cache_key] = img
+            return img
+
+        def get_render_image(path, profile, mode):
+            op_key = int(self._clamp_value(profile["opacity"], 0.05, 1.0, 0.85) * 1000)
+            size_key = int(self._clamp_value(profile["size_ratio"], 0.03, 0.7, 0.18) * 1000)
+            side_key = self.stamp_seam_side_var.get()
+            align_key = self.stamp_seam_align_var.get()
+            overlap_key = int(self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25) * 1000)
+            cache_key = (path, mode, op_key, size_key, side_key, align_key, overlap_key, page_count, disp_w, disp_h, bool(self.stamp_remove_white_bg_var.get()))
+            if cache_key in render_cache:
+                return render_cache[cache_key]
+
+            if mode == "seal":
+                base = get_base_image(path).copy()
+                base = PDFBatchStampConverter._apply_alpha(base, profile["opacity"])
+                tw = max(16, int(disp_w * profile["size_ratio"]))
+                th = max(16, int(tw * base.height / max(1, base.width)))
+                out = base.resize((tw, th), Image.LANCZOS)
+                render_cache[cache_key] = out
+                return out
+
+            if mode == "seam":
+                base = get_base_image(path).copy()
+                base = PDFBatchStampConverter._apply_alpha(base, profile["opacity"])
+                side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(self.stamp_seam_side_var.get(), "right")
                 n_pages = max(1, page_count)
-                side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(
-                    self.stamp_seam_side_var.get(), "right"
-                )
                 if side in ("left", "right"):
-                    step = image.width / n_pages
-                    x1 = 0
-                    x2 = max(x1 + 1, int(round(step)))
-                    return image.crop((x1, 0, x2, image.height))
-                step = image.height / n_pages
-                y1 = 0
-                y2 = max(y1 + 1, int(round(step)))
-                return image.crop((0, y1, image.width, y2))
-            return self._build_template_preview_image(opacity)
-
-        def draw_preview():
-            profile["opacity"] = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.85)
-            canvas.delete("all")
-
-            state["page_tk"] = ImageTk.PhotoImage(page_display)
-            canvas.create_image(pad, pad, anchor="nw", image=state["page_tk"])
-            canvas.create_rectangle(pad, pad, pad + disp_w, pad + disp_h, outline="#bbbbbb")
-
-            stamp_image = build_stamp_image(profile["opacity"])
-            if stamp_image is None:
-                canvas.create_text(pad + disp_w / 2, pad + disp_h / 2, text="当前模式无可预览章图", fill="#999999")
-                state["stamp_bbox"] = None
-                return
-
-            if mode_key in ("seal", "qr"):
-                target_w = max(16, int(disp_w * profile["size_ratio"]))
-                target_h = max(16, int(target_w * stamp_image.height / max(1, stamp_image.width)))
-                stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
-
-                center_x = pad + profile["x_ratio"] * disp_w
-                center_y = pad + profile["y_ratio"] * disp_h
-                x = center_x - target_w / 2
-                y = center_y - target_h / 2
-                x = max(pad, min(x, pad + disp_w - target_w))
-                y = max(pad, min(y, pad + disp_h - target_h))
-                center_x = x + target_w / 2
-                center_y = y + target_h / 2
-                profile["x_ratio"] = self._clamp_value((center_x - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
-                profile["y_ratio"] = self._clamp_value((center_y - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
-
-                state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
-                canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"], tags=("stamp",))
-                state["stamp_bbox"] = (x, y, x + target_w, y + target_h)
-                return
-
-            if mode_key == "seam":
-                side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(
-                    self.stamp_seam_side_var.get(), "right"
-                )
-                align = {"居中": "center", "顶部": "top", "底部": "bottom"}.get(
-                    self.stamp_seam_align_var.get(), "center"
-                )
-                overlap = self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25)
-                if side in ("left", "right"):
-                    target_h = max(10, int(disp_h / max(1, page_count)))
-                    target_w = max(10, int(target_h * stamp_image.width / max(1, stamp_image.height)))
-                    y = pad if align == "top" else (pad + disp_h - target_h if align == "bottom" else pad + (disp_h - target_h) / 2)
-                    x = pad + disp_w - target_w * (1.0 - overlap) if side == "right" else pad - target_w * overlap
+                    step = base.width / n_pages
+                    x1, x2 = 0, max(1, int(round(step)))
+                    piece = base.crop((x1, 0, x2, base.height))
+                    base_h = max(10, int(disp_h / n_pages))
+                    sr = self._clamp_value(profile["size_ratio"] / 0.18, 0.6, 2.2, 1.0)
+                    th = max(10, int(base_h * sr))
+                    tw = max(10, int(th * piece.width / max(1, piece.height)))
                 else:
-                    target_w = max(10, int(disp_w / max(1, page_count)))
-                    target_h = max(10, int(target_w * stamp_image.height / max(1, stamp_image.width)))
-                    x = pad if align == "top" else (pad + disp_w - target_w if align == "bottom" else pad + (disp_w - target_w) / 2)
-                    y = pad - target_h * overlap if side == "top" else pad + disp_h - target_h * (1.0 - overlap)
-                stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
-                state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
-                canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"])
-                state["stamp_bbox"] = None
-                return
+                    step = base.height / n_pages
+                    y1, y2 = 0, max(1, int(round(step)))
+                    piece = base.crop((0, y1, base.width, y2))
+                    base_w = max(10, int(disp_w / n_pages))
+                    sr = self._clamp_value(profile["size_ratio"] / 0.18, 0.6, 2.2, 1.0)
+                    tw = max(10, int(base_w * sr))
+                    th = max(10, int(tw * piece.height / max(1, piece.width)))
+                out = piece.resize((tw, th), Image.LANCZOS)
+                render_cache[cache_key] = out
+                return out
 
-            target_w = max(16, int(disp_w * profile["size_ratio"]))
-            target_h = max(16, int(target_w * stamp_image.height / max(1, stamp_image.width)))
-            stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
-            x = pad + (disp_w - target_w) / 2
-            y = pad + (disp_h - target_h) / 2
-            state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
-            canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"])
-            state["stamp_bbox"] = None
+            return None
+
+        def schedule_redraw(delay_ms=16):
+            if state["render_job"] is not None:
+                try:
+                    preview_win.after_cancel(state["render_job"])
+                except Exception:
+                    pass
+            state["render_job"] = preview_win.after(delay_ms, redraw)
+
+        def redraw():
+            state["render_job"] = None
+            active_key = get_active_key()
+            if mode_key in ("seal", "seam"):
+                enabled_paths = [p for p in preview_paths if enabled_vars[p].get()]
+                for path in preview_paths:
+                    profile = get_profile(path)
+                    profile["enabled"] = bool(enabled_vars[path].get())
+                    profile["opacity"] = self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85)
+                    profile["size_ratio"] = self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18)
+                    item = state["stamp_items"].get(path)
+                    if not profile["enabled"]:
+                        if item:
+                            canvas.itemconfigure(item["id"], state="hidden")
+                            item["bbox"] = None
+                        continue
+
+                    rendered = get_render_image(path, profile, mode_key)
+                    if rendered is None:
+                        continue
+                    rw, rh = rendered.size
+                    if mode_key == "seal":
+                        cx = pad + profile["x_ratio"] * disp_w
+                        cy = pad + profile["y_ratio"] * disp_h
+                        x = max(pad, min(cx - rw / 2, pad + disp_w - rw))
+                        y = max(pad, min(cy - rh / 2, pad + disp_h - rh))
+                        profile["x_ratio"] = self._clamp_value((x + rw / 2 - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
+                        profile["y_ratio"] = self._clamp_value((y + rh / 2 - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+                    else:
+                        side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(self.stamp_seam_side_var.get(), "right")
+                        align = {"居中": "center", "顶部": "top", "底部": "bottom"}.get(self.stamp_seam_align_var.get(), "center")
+                        overlap = self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25)
+                        vis_idx = enabled_paths.index(path) if path in enabled_paths else 0
+                        stack_off = vis_idx * 6
+                        if side in ("left", "right"):
+                            y = pad if align == "top" else (pad + disp_h - rh if align == "bottom" else pad + (disp_h - rh) / 2)
+                            x = pad + disp_w - rw * (1.0 - overlap) if side == "right" else pad - rw * overlap
+                            y += stack_off
+                        else:
+                            x = pad if align == "top" else (pad + disp_w - rw if align == "bottom" else pad + (disp_w - rw) / 2)
+                            y = pad - rh * overlap if side == "top" else pad + disp_h - rh * (1.0 - overlap)
+                            x += stack_off
+
+                    tk_img = ImageTk.PhotoImage(rendered)
+                    if item is None:
+                        cid = canvas.create_image(int(x), int(y), anchor="nw", image=tk_img)
+                        state["stamp_items"][path] = {"id": cid, "photo": tk_img, "bbox": (x, y, x + rw, y + rh), "size": (rw, rh)}
+                    else:
+                        canvas.itemconfigure(item["id"], image=tk_img, state="normal")
+                        canvas.coords(item["id"], int(x), int(y))
+                        item["photo"] = tk_img
+                        item["bbox"] = (x, y, x + rw, y + rh)
+                        item["size"] = (rw, rh)
+
+                active_item = state["stamp_items"].get(active_key)
+                if active_item and active_item.get("bbox"):
+                    x1, y1, x2, y2 = active_item["bbox"]
+                    canvas.coords(state["selection_rect"], x1 - 2, y1 - 2, x2 + 2, y2 + 2)
+                    canvas.itemconfigure(state["selection_rect"], state="normal")
+                else:
+                    canvas.itemconfigure(state["selection_rect"], state="hidden")
+            else:
+                single_key = "__single__"
+                profile = get_profile(single_key)
+                profile["opacity"] = self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85)
+                profile["size_ratio"] = self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18)
+                if mode_key == "qr":
+                    try:
+                        qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
+                            self.stamp_qr_text_var.get().strip(),
+                            opacity=profile["opacity"],
+                            remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+                        )
+                        src = Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                    except Exception:
+                        src = None
+                else:
+                    src = self._build_template_preview_image(profile["opacity"])
+                item = state["stamp_items"].get(single_key)
+                if src is None:
+                    if item:
+                        canvas.itemconfigure(item["id"], state="hidden")
+                    return
+                tw = max(16, int(disp_w * profile["size_ratio"]))
+                th = max(16, int(tw * src.height / max(1, src.width)))
+                img = src.resize((tw, th), Image.LANCZOS)
+                x = max(pad, min(pad + profile["x_ratio"] * disp_w - tw / 2, pad + disp_w - tw))
+                y = max(pad, min(pad + profile["y_ratio"] * disp_h - th / 2, pad + disp_h - th))
+                profile["x_ratio"] = self._clamp_value((x + tw / 2 - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
+                profile["y_ratio"] = self._clamp_value((y + th / 2 - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+                tk_img = ImageTk.PhotoImage(img)
+                if item is None:
+                    cid = canvas.create_image(int(x), int(y), anchor="nw", image=tk_img)
+                    state["stamp_items"][single_key] = {"id": cid, "photo": tk_img, "bbox": (x, y, x + tw, y + th), "size": (tw, th)}
+                else:
+                    canvas.itemconfigure(item["id"], image=tk_img, state="normal")
+                    canvas.coords(item["id"], int(x), int(y))
+                    item["photo"] = tk_img
+                    item["bbox"] = (x, y, x + tw, y + th)
+                    item["size"] = (tw, th)
+                canvas.coords(state["selection_rect"], x - 2, y - 2, x + tw + 2, y + th + 2)
+                canvas.itemconfigure(state["selection_rect"], state="normal")
+
+        def on_active_change(*_args):
+            sync_sliders_from_active()
+            schedule_redraw(1)
+
+        def on_enabled_change(*_args):
+            schedule_redraw(1)
+
+        def on_slider_change(_value=None):
+            if state["suspend_slider"]:
+                return
+            key = get_active_key()
+            if not key:
+                return
+            profile = get_profile(key)
+            profile["opacity"] = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.85)
+            profile["size_ratio"] = self._clamp_value(size_var.get() / 100.0, 0.03, 0.7, 0.18)
+            schedule_redraw(8)
+
+        def hit_test_path(x, y):
+            for p in reversed(preview_paths):
+                item = state["stamp_items"].get(p)
+                if not item or not item.get("bbox"):
+                    continue
+                x1, y1, x2, y2 = item["bbox"]
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    return p
+            return ""
 
         def on_press(event):
-            if mode_key not in ("seal", "qr"):
+            if mode_key == "seal":
+                p = hit_test_path(event.x, event.y)
+                if not p:
+                    state["drag_path"] = None
+                    return
+                active_path_var.set(p)
+                on_active_change()
+                item = state["stamp_items"].get(p)
+                if not item:
+                    return
+                x1, y1, x2, y2 = item["bbox"]
+                state["drag_path"] = p
+                state["drag_offset_x"] = event.x - (x1 + x2) / 2
+                state["drag_offset_y"] = event.y - (y1 + y2) / 2
                 return
-            bbox = state.get("stamp_bbox")
-            if not bbox:
-                return
-            x1, y1, x2, y2 = bbox
-            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
-                state["dragging"] = True
+            if mode_key == "qr":
+                item = state["stamp_items"].get("__single__")
+                if not item or not item.get("bbox"):
+                    return
+                x1, y1, x2, y2 = item["bbox"]
+                if not (x1 <= event.x <= x2 and y1 <= event.y <= y2):
+                    return
+                state["drag_path"] = "__single__"
                 state["drag_offset_x"] = event.x - (x1 + x2) / 2
                 state["drag_offset_y"] = event.y - (y1 + y2) / 2
 
         def on_drag(event):
-            if mode_key not in ("seal", "qr") or not state.get("dragging"):
+            if mode_key not in ("seal", "qr"):
                 return
-            bbox = state.get("stamp_bbox")
-            if not bbox:
+            p = state.get("drag_path")
+            if not p:
                 return
-            width = bbox[2] - bbox[0]
-            height = bbox[3] - bbox[1]
-            center_x = event.x - state["drag_offset_x"]
-            center_y = event.y - state["drag_offset_y"]
-            center_x = max(pad + width / 2, min(center_x, pad + disp_w - width / 2))
-            center_y = max(pad + height / 2, min(center_y, pad + disp_h - height / 2))
-            profile["x_ratio"] = self._clamp_value((center_x - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
-            profile["y_ratio"] = self._clamp_value((center_y - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
-            draw_preview()
+            item = state["stamp_items"].get(p)
+            if not item:
+                return
+            w, h = item.get("size", (0, 0))
+            if w <= 0 or h <= 0:
+                return
+            cx = event.x - state["drag_offset_x"]
+            cy = event.y - state["drag_offset_y"]
+            cx = max(pad + w / 2, min(cx, pad + disp_w - w / 2))
+            cy = max(pad + h / 2, min(cy, pad + disp_h - h / 2))
+            x = cx - w / 2
+            y = cy - h / 2
+            canvas.coords(item["id"], int(x), int(y))
+            item["bbox"] = (x, y, x + w, y + h)
+            prof = get_profile(p)
+            prof["x_ratio"] = self._clamp_value((cx - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
+            prof["y_ratio"] = self._clamp_value((cy - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+            canvas.coords(state["selection_rect"], x - 2, y - 2, x + w + 2, y + h + 2)
 
         def on_release(_event):
-            state["dragging"] = False
+            state["drag_path"] = None
+
+        if mode_key in ("seal", "seam"):
+            for p, ev in enabled_vars.items():
+                ev.trace_add("write", on_enabled_change)
+            active_path_var.trace_add("write", on_active_change)
 
         canvas.bind("<ButtonPress-1>", on_press)
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_release)
-        opacity_scale.configure(command=lambda _v: draw_preview())
+        opacity_scale.configure(command=on_slider_change)
+        size_scale.configure(command=on_slider_change)
 
         action_frame = tk.Frame(preview_win)
-        action_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+        action_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 12))
 
         def apply_preview():
-            self.stamp_preview_profile = {
-                "x_ratio": self._clamp_value(profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
-                "y_ratio": self._clamp_value(profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
-                "size_ratio": self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
-                "opacity": self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85),
-            }
+            if mode_key in ("seal", "seam"):
+                for p in preview_paths:
+                    profile = self._normalize_stamp_profile(preview_profiles.get(p))
+                    profile["enabled"] = bool(enabled_vars[p].get())
+                    self.stamp_profiles[p] = profile
+                active_path = active_path_var.get()
+                if active_path in self.stamp_image_paths:
+                    self.stamp_selected_image_idx = self.stamp_image_paths.index(active_path)
+                    self.stamp_image_path = active_path
+                active_profile = self._normalize_stamp_profile(preview_profiles.get(active_path))
+                self.stamp_preview_profile = {
+                    "x_ratio": active_profile["x_ratio"],
+                    "y_ratio": active_profile["y_ratio"],
+                    "size_ratio": active_profile["size_ratio"],
+                    "opacity": active_profile["opacity"],
+                }
+            else:
+                profile = self._normalize_stamp_profile(preview_profiles.get("__single__"))
+                self.stamp_preview_profile = {
+                    "x_ratio": profile["x_ratio"],
+                    "y_ratio": profile["y_ratio"],
+                    "size_ratio": profile["size_ratio"],
+                    "opacity": profile["opacity"],
+                }
+
             self.stamp_opacity_var.set(f"{self.stamp_preview_profile['opacity']:.2f}")
+            self._update_stamp_image_label()
             self._update_stamp_preview_info()
             self.save_settings()
             preview_win.destroy()
@@ -1426,16 +1757,17 @@ class PDFConverterApp:
         tk.Button(action_frame, text="应用到批量盖章", command=apply_preview,
                   font=("Microsoft YaHei", 9, "bold"), width=14).pack(side=tk.RIGHT)
 
-        draw_preview()
+        sync_sliders_from_active()
+        schedule_redraw(1)
 
     def _on_stamp_mode_changed(self, event=None):
         mode_key = self._get_stamp_mode_key()
         if mode_key == "seal":
-            self.stamp_hint_var.set("普通章：在预览窗口拖拽位置，透明度在预览中调整。")
+            self.stamp_hint_var.set("普通章：支持多个章图，预览中勾选章图并拖拽定位，可调透明度和缩放。")
         elif mode_key == "qr":
             self.stamp_hint_var.set("二维码：输入内容后可在预览中拖拽位置并调整透明度。")
         elif mode_key == "seam":
-            self.stamp_hint_var.set("骑缝章：在预览中查看切片效果，设置骑缝边/对齐/压边比例。")
+            self.stamp_hint_var.set("骑缝章：支持多个章图，预览中勾选章图并查看切片效果。")
         else:
             self.stamp_hint_var.set("模板：按 JSON 模板批量盖章；可预览模板元素效果。")
 
@@ -1684,16 +2016,7 @@ class PDFConverterApp:
             if filename:
                 self.selected_file.set(filename)
                 self.selected_files_list = [filename]
-                try:
-                    import fitz
-                    doc = fitz.open(filename)
-                    pages = len(doc)
-                    doc.close()
-                    self.status_message.set(
-                        f"已选择: {os.path.basename(filename)} ({pages}页)")
-                except Exception:
-                    self.status_message.set(
-                        f"已选择: {os.path.basename(filename)}")
+                self.status_message.set(f"已选择: {os.path.basename(filename)}")
 
         elif func == "图片转PDF":
             # 多选图片
@@ -1727,18 +2050,7 @@ class PDFConverterApp:
             if filename:
                 self.selected_file.set(filename)
                 self.selected_files_list = [filename]
-                try:
-                    import fitz
-                    doc = fitz.open(filename)
-                    pages = len(doc)
-                    encrypted = doc.is_encrypted
-                    doc.close()
-                    extra = "，已加密" if encrypted else ""
-                    self.status_message.set(
-                        f"已选择: {os.path.basename(filename)} ({pages}页{extra})")
-                except Exception:
-                    self.status_message.set(
-                        f"已选择: {os.path.basename(filename)}")
+                self.status_message.set(f"已选择: {os.path.basename(filename)}")
 
         self._update_order_btn()
 
@@ -1842,8 +2154,8 @@ class PDFConverterApp:
                     return
             if func == "PDF批量盖章":
                 mode_key = self._get_stamp_mode_key()
-                if mode_key in ("seal", "seam") and not self.stamp_image_path:
-                    messagebox.showwarning("提示", "请先选择章图文件。")
+                if mode_key in ("seal", "seam") and not self._get_enabled_stamp_profiles():
+                    messagebox.showwarning("提示", "请先选择章图，并至少勾选一个章图。")
                     return
                 if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
                     messagebox.showwarning("提示", "请填写二维码内容。")
@@ -2118,6 +2430,7 @@ class PDFConverterApp:
             "y_ratio": self._clamp_value(self.stamp_preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
             "size_ratio": size_ratio,
         }
+        stamp_profiles = self._get_enabled_stamp_profiles()
 
         result = converter.convert(
             files=list(self.selected_files_list),
@@ -2126,7 +2439,7 @@ class PDFConverterApp:
             opacity=opacity_value,
             position="right_bottom",
             size_ratio=size_ratio,
-            seal_image_path=self.stamp_image_path,
+            seal_image_path=self._get_active_stamp_image_path(),
             qr_text=self.stamp_qr_text_var.get().strip(),
             seam_side=seam_side_map.get(self.stamp_seam_side_var.get(), "right"),
             seam_align=seam_align_map.get(self.stamp_seam_align_var.get(), "center"),
@@ -2134,6 +2447,7 @@ class PDFConverterApp:
             template_path=self.stamp_template_path,
             placement=placement,
             remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+            stamp_profiles=stamp_profiles,
         )
 
         self.history.add({
@@ -3170,11 +3484,25 @@ class PDFConverterApp:
                     "opacity": self._clamp_value(self.stamp_opacity_var.get(), 0.05, 1.0, 0.85),
                 }
             self.stamp_opacity_var.set(f"{self.stamp_preview_profile.get('opacity', 0.85):.2f}")
-            self.stamp_image_path = data.get('stamp_image_path', '') or ''
+            saved_image_paths = data.get('stamp_image_paths', [])
+            if not isinstance(saved_image_paths, list):
+                saved_image_paths = []
+            if not saved_image_paths:
+                legacy_single = data.get('stamp_image_path', '') or ''
+                if legacy_single:
+                    saved_image_paths = [legacy_single]
+            self._set_stamp_images(saved_image_paths, selected_idx=data.get('stamp_selected_image_idx', 0))
+            saved_profiles = data.get('stamp_profiles', {})
+            if isinstance(saved_profiles, dict):
+                loaded_profiles = {}
+                for k, v in saved_profiles.items():
+                    full = os.path.abspath(str(k))
+                    if full in self.stamp_image_paths and isinstance(v, dict):
+                        loaded_profiles[full] = self._normalize_stamp_profile(v)
+                for full in self.stamp_image_paths:
+                    loaded_profiles[full] = self._normalize_stamp_profile(loaded_profiles.get(full))
+                self.stamp_profiles = loaded_profiles
             self.stamp_template_path = data.get('stamp_template_path', '') or ''
-            if self.stamp_image_path and os.path.exists(self.stamp_image_path):
-                nm = os.path.basename(self.stamp_image_path)
-                self.stamp_image_label.config(text=nm if len(nm) <= 16 else nm[:13] + "...")
             if self.stamp_template_path and os.path.exists(self.stamp_template_path):
                 nm2 = os.path.basename(self.stamp_template_path)
                 self.stamp_template_label.config(text=nm2 if len(nm2) <= 16 else nm2[:13] + "...")
@@ -3229,7 +3557,13 @@ class PDFConverterApp:
                 'size_ratio': self._clamp_value(self.stamp_preview_profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
                 'opacity': self._clamp_value(self.stamp_preview_profile.get("opacity", self.stamp_opacity_var.get()), 0.05, 1.0, 0.85),
             },
-            'stamp_image_path': self.stamp_image_path,
+            'stamp_image_paths': list(self.stamp_image_paths),
+            'stamp_selected_image_idx': int(self.stamp_selected_image_idx),
+            'stamp_profiles': {
+                p: self._normalize_stamp_profile(self.stamp_profiles.get(p))
+                for p in self.stamp_image_paths if p
+            },
+            'stamp_image_path': self._get_active_stamp_image_path(),
             'stamp_template_path': self.stamp_template_path,
         }
         try:

@@ -13,7 +13,7 @@ except ImportError:
     FITZ_AVAILABLE = False
 
 try:
-    from PIL import Image, ImageEnhance
+    from PIL import Image, ImageEnhance, ImageChops
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -50,6 +50,7 @@ class PDFBatchStampConverter:
         template_path="",
         placement=None,
         remove_white_bg=False,
+        stamp_profiles=None,
     ):
         result = {
             "success": False,
@@ -84,9 +85,18 @@ class PDFBatchStampConverter:
             return result
         has_page_filter = bool((pages_str or "").strip())
 
-        if mode in ("seal", "seam") and (not seal_image_path or not os.path.exists(seal_image_path)):
-            result["message"] = f"Stamp image not found: {seal_image_path}"
-            return result
+        normalized_profiles = []
+        if mode in ("seal", "seam"):
+            normalized_profiles = self._normalize_stamp_profiles(
+                stamp_profiles=stamp_profiles,
+                seal_image_path=seal_image_path,
+                opacity=opacity,
+                size_ratio=size_ratio,
+                placement=placement,
+            )
+            if not normalized_profiles:
+                result["message"] = "No valid stamp images selected"
+                return result
         if mode == "qr":
             if not qr_text.strip():
                 result["message"] = "QR text is empty"
@@ -117,12 +127,6 @@ class PDFBatchStampConverter:
             result["error_count"] = len(result["errors"])
             return result
 
-        seal_bytes = None
-        if mode in ("seal", "seam"):
-            seal_bytes = self._image_with_opacity(
-                seal_image_path, opacity=opacity, remove_white_bg=remove_white_bg
-            )
-
         template_obj = None
         if mode == "template":
             try:
@@ -149,14 +153,20 @@ class PDFBatchStampConverter:
                     pages = list(range(page_count))
 
                 if mode == "seal":
-                    self._apply_seal(
-                        doc,
-                        pages,
-                        seal_bytes,
-                        position=position,
-                        size_ratio=size_ratio,
-                        placement=placement,
-                    )
+                    for sp in normalized_profiles:
+                        image_bytes = self._image_with_opacity(
+                            sp["image_path"],
+                            opacity=sp["opacity"],
+                            remove_white_bg=remove_white_bg,
+                        )
+                        self._apply_seal(
+                            doc,
+                            pages,
+                            image_bytes,
+                            position=position,
+                            size_ratio=sp["size_ratio"],
+                            placement=sp.get("placement"),
+                        )
                 elif mode == "qr":
                     qr_bytes = self._make_qr_png_bytes(
                         qr_text.strip(),
@@ -172,16 +182,17 @@ class PDFBatchStampConverter:
                         placement=placement,
                     )
                 elif mode == "seam":
-                    self._apply_seam(
-                        doc,
-                        pages,
-                        seal_image_path,
-                        side=seam_side,
-                        align=seam_align,
-                        overlap_ratio=seam_overlap_ratio,
-                        opacity=opacity,
-                        remove_white_bg=remove_white_bg,
-                    )
+                    for sp in normalized_profiles:
+                        self._apply_seam(
+                            doc,
+                            pages,
+                            sp["image_path"],
+                            side=seam_side,
+                            align=seam_align,
+                            overlap_ratio=seam_overlap_ratio,
+                            opacity=sp["opacity"],
+                            remove_white_bg=remove_white_bg,
+                        )
                 elif mode == "template":
                     self._apply_template(
                         doc,
@@ -390,6 +401,50 @@ class PDFBatchStampConverter:
                         overlay=True,
                     )
 
+    def _normalize_stamp_profiles(self, stamp_profiles, seal_image_path, opacity, size_ratio, placement):
+        normalized = []
+        items = stamp_profiles if isinstance(stamp_profiles, list) else []
+        seen_paths = set()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get("enabled", True)):
+                continue
+            image_path = os.path.abspath(str(item.get("image_path", "")).strip())
+            if not image_path or not os.path.exists(image_path):
+                continue
+            if image_path in seen_paths:
+                continue
+            seen_paths.add(image_path)
+            item_opacity = self._clamp(item.get("opacity", opacity), 0.05, 1.0, opacity)
+            item_size = self._clamp(item.get("size_ratio", size_ratio), 0.03, 0.7, size_ratio)
+            item_placement = item.get("placement")
+            if not isinstance(item_placement, dict):
+                item_placement = {
+                    "x_ratio": item.get("x_ratio", 0.85),
+                    "y_ratio": item.get("y_ratio", 0.85),
+                    "size_ratio": item.get("size_ratio", item_size),
+                }
+            normalized.append({
+                "image_path": image_path,
+                "opacity": item_opacity,
+                "size_ratio": item_size,
+                "placement": item_placement,
+            })
+
+        if normalized:
+            return normalized
+
+        if seal_image_path and os.path.exists(seal_image_path):
+            normalized.append({
+                "image_path": os.path.abspath(seal_image_path),
+                "opacity": self._clamp(opacity, 0.05, 1.0, 0.85),
+                "size_ratio": self._clamp(size_ratio, 0.03, 0.7, 0.18),
+                "placement": placement if isinstance(placement, dict) else None,
+            })
+        return normalized
+
     @staticmethod
     def _parse_pages_str(pages_str):
         if not pages_str or not pages_str.strip():
@@ -445,13 +500,13 @@ class PDFBatchStampConverter:
     def _remove_white_background(img_rgba, threshold=245):
         if img_rgba.mode != "RGBA":
             img_rgba = img_rgba.convert("RGBA")
-        px = img_rgba.load()
-        width, height = img_rgba.size
-        for y in range(height):
-            for x in range(width):
-                r, g, b, a = px[x, y]
-                if a > 0 and r >= threshold and g >= threshold and b >= threshold:
-                    px[x, y] = (r, g, b, 0)
+        r, g, b, a = img_rgba.split()
+        r_mask = r.point(lambda v: 255 if v >= threshold else 0)
+        g_mask = g.point(lambda v: 255 if v >= threshold else 0)
+        b_mask = b.point(lambda v: 255 if v >= threshold else 0)
+        white_mask = ImageChops.multiply(ImageChops.multiply(r_mask, g_mask), b_mask)
+        new_alpha = ImageChops.subtract(a, white_mask)
+        img_rgba.putalpha(new_alpha)
         return img_rgba
 
     def _image_with_opacity(self, image_path, opacity, remove_white_bg=False):
