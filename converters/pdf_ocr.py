@@ -28,6 +28,12 @@ try:
 except ImportError:
     REQUESTS_AVAILABLE = False
 
+try:
+    from PIL import Image, ImageOps, ImageFilter
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 
 class PDFOCRConverter:
     """PDF OCR转换器 — 生成可搜索PDF，与 UI 完全解耦。
@@ -148,6 +154,18 @@ class PDFOCRConverter:
                     logging.warning(f"第{page_num}页OCR失败: {e}")
                     continue
 
+                # 低置信度时自动提高DPI重试一次
+                if self._score_loc_words(words_with_loc) < 120 and dpi < 360:
+                    try:
+                        pix_hi = page.get_pixmap(dpi=360)
+                        words_hi = self._ocr_with_location(
+                            pix_hi.tobytes("png"), token, 360
+                        )
+                        if self._score_loc_words(words_hi) > self._score_loc_words(words_with_loc):
+                            words_with_loc = words_hi
+                    except Exception as e:
+                        logging.debug(f"第{page_num}页高DPI重试失败: {e}")
+
                 if not words_with_loc:
                     continue
 
@@ -232,6 +250,60 @@ class PDFOCRConverter:
         返回格式: [{'text': str, 'x': float, 'y': float, 'w': float, 'h': float}, ...]
         坐标已从像素坐标转换为PDF页面坐标（72 DPI 基准）。
         """
+        best_words = self._ocr_with_location_once(image_bytes, token, dpi)
+        best_score = self._score_loc_words(best_words)
+        logging.info(f"OCR-with-location pass#1 score={best_score}, words={len(best_words)}")
+
+        # 低置信度页触发预处理重试
+        if best_score < 120 and PIL_AVAILABLE:
+            for mode in ("normal", "strong"):
+                try:
+                    normalized = self._normalize_scan_image(image_bytes, mode=mode)
+                    words2 = self._ocr_with_location_once(normalized, token, dpi)
+                    score2 = self._score_loc_words(words2)
+                    logging.info(
+                        f"OCR-with-location retry[{mode}] score={score2}, words={len(words2)}"
+                    )
+                    if score2 > best_score:
+                        best_words = words2
+                        best_score = score2
+                except Exception as e:
+                    logging.debug(f"OCR-with-location retry failed ({mode}): {e}")
+
+        return best_words
+
+    @staticmethod
+    def _score_loc_words(words):
+        if not words:
+            return 0
+        chars = sum(len((w.get("text") or "").strip()) for w in words)
+        lines = sum(1 for w in words if (w.get("text") or "").strip())
+        return lines * 10 + chars
+
+    @staticmethod
+    def _normalize_scan_image(image_bytes, mode="normal"):
+        """对扫描页做轻量增强，返回 PNG bytes。"""
+        if not PIL_AVAILABLE:
+            return image_bytes
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            gray = ImageOps.grayscale(img)
+            if mode == "strong":
+                gray = ImageOps.autocontrast(gray, cutoff=2)
+                gray = gray.filter(ImageFilter.MedianFilter(size=3))
+                gray = gray.point(lambda p: 255 if p > 170 else 0)
+            else:
+                gray = ImageOps.autocontrast(gray, cutoff=1)
+                gray = gray.filter(ImageFilter.SHARPEN)
+
+            out = io.BytesIO()
+            gray.save(out, format="PNG")
+            return out.getvalue()
+        except Exception as e:
+            logging.debug(f"Normalize scan image failed ({mode}): {e}")
+            return image_bytes
+
+    def _ocr_with_location_once(self, image_bytes, token, dpi):
         # 压缩图片（百度API限制4MB）
         compressed = self._compress_for_api(image_bytes)
         img_b64 = base64.b64encode(compressed).decode()

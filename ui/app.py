@@ -762,6 +762,12 @@ class PDFConverterApp:
             cursor='hand2'
         )
         self.stamp_preview_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.stamp_export_template_btn = tk.Button(
+            self.stamp_options4_frame, text="导出模板...",
+            font=("Microsoft YaHei", 8), command=self._export_stamp_template_from_current,
+            cursor='hand2'
+        )
+        self.stamp_export_template_btn.pack(side=tk.LEFT, padx=(0, 8))
         tk.Label(self.stamp_options4_frame, textvariable=self.stamp_preview_info_var,
                  font=("Microsoft YaHei", 8), fg="#666").pack(side=tk.LEFT)
         self.cv_stamp_options4 = self.panel_canvas.create_window(15, 315, window=self.stamp_options4_frame, anchor="nw")
@@ -1202,6 +1208,182 @@ class PDFConverterApp:
             self.stamp_template_label.config(text=name if len(name) <= 16 else name[:13] + "...")
             self._update_stamp_preview_info()
             self.save_settings()
+
+    def _parse_template_pages_scope(self, pages_text):
+        parsed = PDFBatchStampConverter._parse_pages_str((pages_text or "").strip())
+        if parsed is None:
+            return None
+        if not parsed:
+            return []
+        return [p + 1 for p in sorted(set(parsed))]
+
+    def _build_stamp_template_data(
+        self,
+        mode_key,
+        profiles=None,
+        single_profile=None,
+        qr_text="",
+        pages_text="",
+    ):
+        scope = self._parse_template_pages_scope(pages_text)
+        if scope is None:
+            raise ValueError("页码格式不正确，请使用 1,3,5-10 这种格式。")
+
+        template_data = {
+            "version": 1,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": mode_key,
+            "remove_white_bg": bool(self.stamp_remove_white_bg_var.get()),
+            "elements": [],
+        }
+
+        def with_scope(elem):
+            if scope:
+                elem["pages"] = list(scope)
+            return elem
+
+        if mode_key == "template":
+            if not (self.stamp_template_path and os.path.exists(self.stamp_template_path)):
+                raise ValueError("当前未选择模板 JSON。")
+            with open(self.stamp_template_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                loaded_data = dict(loaded)
+                loaded_data.setdefault("version", 1)
+                loaded_data.setdefault("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                loaded_data["exported_from"] = os.path.abspath(self.stamp_template_path)
+                return loaded_data
+            if isinstance(loaded, list):
+                return {
+                    "version": 1,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "mode": "template",
+                    "elements": loaded,
+                }
+            raise ValueError("模板 JSON 结构无效。")
+
+        if mode_key in ("seal", "seam"):
+            items = []
+            for item in profiles or []:
+                if not isinstance(item, dict):
+                    continue
+                image_path = os.path.abspath(str(item.get("image_path", "")).strip())
+                if not image_path or not os.path.exists(image_path):
+                    continue
+                prof = self._normalize_stamp_profile(item)
+                items.append({
+                    "image_path": image_path,
+                    "x_ratio": prof["x_ratio"],
+                    "y_ratio": prof["y_ratio"],
+                    "size_ratio": prof["size_ratio"],
+                    "opacity": prof["opacity"],
+                })
+            if not items:
+                raise ValueError("没有可导出的章图，请先勾选可用章图。")
+
+            if mode_key == "seal":
+                for it in items:
+                    template_data["elements"].append(with_scope({
+                        "type": "seal",
+                        "image_path": it["image_path"],
+                        "x_ratio": it["x_ratio"],
+                        "y_ratio": it["y_ratio"],
+                        "w_ratio": it["size_ratio"],
+                        "opacity": it["opacity"],
+                    }))
+            else:
+                seam_side_map = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}
+                seam_align_map = {"居中": "center", "顶部": "top", "底部": "bottom"}
+                overlap = self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25)
+                side = seam_side_map.get(self.stamp_seam_side_var.get(), "right")
+                align = seam_align_map.get(self.stamp_seam_align_var.get(), "center")
+                for it in items:
+                    template_data["elements"].append(with_scope({
+                        "type": "seam",
+                        "image_path": it["image_path"],
+                        "size_ratio": it["size_ratio"],
+                        "opacity": it["opacity"],
+                        "side": side,
+                        "align": align,
+                        "overlap_ratio": overlap,
+                    }))
+            return template_data
+
+        if mode_key == "qr":
+            txt = (qr_text or "").strip()
+            if not txt:
+                raise ValueError("二维码内容为空，无法导出模板。")
+            prof = self._normalize_stamp_profile(single_profile or self.stamp_preview_profile)
+            template_data["elements"].append(with_scope({
+                "type": "qr",
+                "text": txt,
+                "x_ratio": prof["x_ratio"],
+                "y_ratio": prof["y_ratio"],
+                "w_ratio": prof["size_ratio"],
+                "opacity": prof["opacity"],
+            }))
+            return template_data
+
+        raise ValueError(f"不支持的模式：{mode_key}")
+
+    def _export_stamp_template(
+        self,
+        mode_key,
+        profiles=None,
+        single_profile=None,
+        qr_text="",
+        pages_text="",
+        parent=None,
+    ):
+        try:
+            template_data = self._build_stamp_template_data(
+                mode_key=mode_key,
+                profiles=profiles,
+                single_profile=single_profile,
+                qr_text=qr_text,
+                pages_text=pages_text,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("导出模板", str(exc), parent=parent)
+            return ""
+        except Exception as exc:
+            messagebox.showerror("导出失败", f"生成模板数据失败：\n{exc}", parent=parent)
+            return ""
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"stamp_template_{mode_key}_{ts}.json"
+        filename = filedialog.asksaveasfilename(
+            title="导出模板JSON",
+            defaultextension=".json",
+            initialfile=default_name,
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+            parent=parent,
+        )
+        if not filename:
+            return ""
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(template_data, f, ensure_ascii=False, indent=2)
+            self.status_message.set("模板JSON已导出")
+            return filename
+        except Exception as exc:
+            messagebox.showerror("导出失败", f"写入模板文件失败：\n{exc}", parent=parent)
+            return ""
+
+    def _export_stamp_template_from_current(self):
+        mode_key = self._get_stamp_mode_key()
+        profiles = self._get_enabled_stamp_profiles() if mode_key in ("seal", "seam") else None
+        single_profile = self.stamp_preview_profile if mode_key in ("qr", "template") else None
+        path = self._export_stamp_template(
+            mode_key=mode_key,
+            profiles=profiles,
+            single_profile=single_profile,
+            qr_text=self.stamp_qr_text_var.get().strip(),
+            pages_text=self.stamp_pages_var.get().strip(),
+            parent=self.root,
+        )
+        if path:
+            messagebox.showinfo("导出成功", f"模板已导出：\n{path}")
 
     @staticmethod
     def _clamp_value(value, min_value, max_value, default):
@@ -1720,6 +1902,38 @@ class PDFConverterApp:
         action_frame = tk.Frame(preview_win)
         action_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 12))
 
+        def export_preview_template():
+            if mode_key in ("seal", "seam"):
+                export_profiles = []
+                for p in preview_paths:
+                    prof = self._normalize_stamp_profile(preview_profiles.get(p))
+                    prof["enabled"] = bool(enabled_vars[p].get())
+                    if not prof["enabled"]:
+                        continue
+                    export_profiles.append({
+                        "image_path": p,
+                        "enabled": True,
+                        "x_ratio": prof["x_ratio"],
+                        "y_ratio": prof["y_ratio"],
+                        "size_ratio": prof["size_ratio"],
+                        "opacity": prof["opacity"],
+                    })
+                single_profile = None
+            else:
+                export_profiles = None
+                single_profile = self._normalize_stamp_profile(preview_profiles.get("__single__"))
+
+            path = self._export_stamp_template(
+                mode_key=mode_key,
+                profiles=export_profiles,
+                single_profile=single_profile,
+                qr_text=self.stamp_qr_text_var.get().strip(),
+                pages_text=self.stamp_pages_var.get().strip(),
+                parent=preview_win,
+            )
+            if path:
+                messagebox.showinfo("导出成功", f"模板已导出：\n{path}", parent=preview_win)
+
         def apply_preview():
             if mode_key in ("seal", "seam"):
                 for p in preview_paths:
@@ -1752,6 +1966,8 @@ class PDFConverterApp:
             self.save_settings()
             preview_win.destroy()
 
+        tk.Button(action_frame, text="导出模板JSON...", command=export_preview_template,
+                  font=("Microsoft YaHei", 9), width=14).pack(side=tk.LEFT)
         tk.Button(action_frame, text="取消", command=preview_win.destroy,
                   font=("Microsoft YaHei", 9), width=12).pack(side=tk.RIGHT, padx=(8, 0))
         tk.Button(action_frame, text="应用到批量盖章", command=apply_preview,

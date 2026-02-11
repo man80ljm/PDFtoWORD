@@ -1,5 +1,38 @@
 [
   {
+    "function": "OCR可搜索PDF",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147\\中国出土壁画全集 4_山东_13292055_第1-30页_可搜索_20260212_011848.pdf",
+    "success": true,
+    "message": "OCR完成！\n处理了 3 页，识别 0 个字符\nPDF已变为可搜索版本，外观不变",
+    "page_count": 3,
+    "timestamp": "2026-02-12 01:19:06"
+  },
+  {
+    "function": "OCR可搜索PDF",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147\\中国出土壁画全集 4_山东_13292055_第1-30页_可搜索_20260212_010755.pdf",
+    "success": true,
+    "message": "OCR完成！\n处理了 2 页，识别 0 个字符\nPDF已变为可搜索版本，外观不变",
+    "page_count": 2,
+    "timestamp": "2026-02-12 01:08:05"
+  },
+  {
+    "function": "OCR可搜索PDF",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147\\中国出土壁画全集 4_山东_13292055_第1-30页_可搜索_20260212_005535.pdf",
+    "success": true,
+    "message": "OCR完成！\n处理了 2 页，识别 0 个字符\nPDF已变为可搜索版本，外观不变",
+    "page_count": 2,
+    "timestamp": "2026-02-12 00:55:50"
+  },
+  {
     "function": "PDF批量盖章",
     "input_files": [
       "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"

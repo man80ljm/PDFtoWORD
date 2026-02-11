@@ -16,7 +16,7 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps, ImageFilter
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -110,9 +110,49 @@ class BaiduOCRClient:
         img.save(buf, 'JPEG', quality=70)
         return buf.getvalue()
 
-    def recognize_text(self, image_bytes):
-        """通用文字识别（高精度版），返回文字行列表"""
-        token = self._get_access_token()
+    @staticmethod
+    def _normalize_scan_image(image_bytes, mode="normal"):
+        """对扫描文档做轻量预处理，返回 PNG bytes。"""
+        if not PIL_AVAILABLE:
+            return image_bytes
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            gray = ImageOps.grayscale(img)
+            if mode == "strong":
+                gray = ImageOps.autocontrast(gray, cutoff=2)
+                gray = gray.filter(ImageFilter.MedianFilter(size=3))
+                # 自适应阈值简化版：固定阈值对白底文档通常足够
+                gray = gray.point(lambda p: 255 if p > 170 else 0)
+            else:
+                gray = ImageOps.autocontrast(gray, cutoff=1)
+                gray = gray.filter(ImageFilter.SHARPEN)
+
+            out = io.BytesIO()
+            gray.save(out, format="PNG")
+            return out.getvalue()
+        except Exception as e:
+            logging.debug(f"Image normalize failed ({mode}): {e}")
+            return image_bytes
+
+    @staticmethod
+    def _extract_words(result):
+        words = []
+        for item in result.get("words_result", []):
+            text = item.get("words", "")
+            if text:
+                words.append(text)
+        return words
+
+    @staticmethod
+    def _score_ocr_result(words):
+        if not words:
+            return 0
+        chars = sum(len(w.strip()) for w in words if w.strip())
+        non_empty_lines = sum(1 for w in words if w.strip())
+        # 行数权重略高，兼顾总字符数
+        return non_empty_lines * 10 + chars
+
+    def _request_text_result(self, image_bytes, token):
         compressed = self._compress_image(image_bytes)
         img_b64 = base64.b64encode(compressed).decode()
         logging.info(f'OCR text request: image base64 size = {len(img_b64)//1024} KB')
@@ -129,15 +169,42 @@ class BaiduOCRClient:
         )
         resp.raise_for_status()
         result = resp.json()
-        logging.info(f'OCR text response keys: {list(result.keys())}, '
-                     f'words_num: {result.get("words_result_num", 0)}')
         if "error_code" in result:
             raise RuntimeError(f"OCR识别失败[{result.get('error_code')}]: "
                                f"{result.get('error_msg', result)}")
-        words = []
-        for item in result.get("words_result", []):
-            words.append(item.get("words", ""))
-        return words
+        return result
+
+    def recognize_text(self, image_bytes):
+        """通用文字识别（高精度版），返回文字行列表"""
+        token = self._get_access_token()
+        # 第一轮：原图
+        best_result = self._request_text_result(image_bytes, token)
+        best_words = self._extract_words(best_result)
+        best_score = self._score_ocr_result(best_words)
+        logging.info(f"OCR pass#1 words={len(best_words)} score={best_score}")
+
+        # 低置信度页才触发重试，控制成本与速度
+        need_retry = (len(best_words) < 6 or best_score < 120)
+        if need_retry and PIL_AVAILABLE:
+            for mode in ("normal", "strong"):
+                try:
+                    normalized = self._normalize_scan_image(image_bytes, mode=mode)
+                    result2 = self._request_text_result(normalized, token)
+                    words2 = self._extract_words(result2)
+                    score2 = self._score_ocr_result(words2)
+                    logging.info(
+                        f"OCR retry[{mode}] words={len(words2)} score={score2}"
+                    )
+                    if score2 > best_score:
+                        best_result = result2
+                        best_words = words2
+                        best_score = score2
+                except Exception as e:
+                    logging.debug(f"OCR retry failed ({mode}): {e}")
+
+        logging.info(f'OCR text response keys: {list(best_result.keys())}, '
+                     f'words_num: {best_result.get("words_result_num", 0)}')
+        return best_words
 
     def recognize_formula(self, image_bytes):
         """公式识别，返回 LaTeX 字符串列表"""

@@ -4,10 +4,10 @@
   "panel_opacity": 20.0,
   "ocr_enabled": false,
   "formula_api_enabled": false,
-  "baidu_api_key_enc": "dnBLNkxGSEFwYmlsOFUyMXIzNm9sUFVY",
-  "baidu_secret_key_enc": "UGVCczc4MUxrZXdUVWtUamJFTEs5TFdkVWxlQVowYlY=",
+  "baidu_api_key_enc": "R2NNeXhtandKWTh2Sm5WaTZxYTZndUt2",
+  "baidu_secret_key_enc": "QVNIaXpVWkw0ZzJQZTAwOGx2Qk1US2pxRXpaazlLZUs=",
   "xslt_path": "",
-  "current_function": "PDF批量文本/图片提取",
+  "current_function": "PDF批量盖章",
   "image_dpi": "200",
   "image_format": "PNG",
   "split_mode": "每页一个PDF",
@@ -24,12 +24,12 @@
   "batch_image_dedupe": false,
   "batch_image_format": "原格式",
   "batch_zip_enabled": false,
-  "stamp_mode": "骑缝章",
+  "stamp_mode": "普通章",
   "stamp_pages": "",
   "stamp_opacity": "0.88",
   "stamp_position": "左上",
   "stamp_size_ratio": "0.18",
-  "stamp_qr_text": "90分",
+  "stamp_qr_text": "",
   "stamp_seam_side": "右侧",
   "stamp_seam_align": "居中",
   "stamp_seam_overlap": "0.25",
@@ -62,5 +62,5 @@
     }
   },
   "stamp_image_path": "D:\\pythonProject\\PDFtoWORD\\dist\\公章2.jpg",
-  "stamp_template_path": ""
+  "stamp_template_path": "D:/pythonProject/PDFtoWORD/dist/stamp_template_seal_20260212_014043.json"
 }

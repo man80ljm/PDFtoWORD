@@ -192,6 +192,7 @@ class PDFBatchStampConverter:
                             overlap_ratio=seam_overlap_ratio,
                             opacity=sp["opacity"],
                             remove_white_bg=remove_white_bg,
+                            size_ratio=sp["size_ratio"],
                         )
                 elif mode == "template":
                     self._apply_template(
@@ -255,7 +256,18 @@ class PDFBatchStampConverter:
                 rect = self._build_rect(page.rect, img_size[0], img_size[1], position, size_ratio)
             page.insert_image(rect, stream=image_bytes, keep_proportion=True, overlay=True)
 
-    def _apply_seam(self, doc, pages, image_path, side, align, overlap_ratio, opacity, remove_white_bg=False):
+    def _apply_seam(
+        self,
+        doc,
+        pages,
+        image_path,
+        side,
+        align,
+        overlap_ratio,
+        opacity,
+        remove_white_bg=False,
+        size_ratio=0.18,
+    ):
         src = Image.open(image_path).convert("RGBA")
         if remove_white_bg:
             src = self._remove_white_background(src)
@@ -263,6 +275,8 @@ class PDFBatchStampConverter:
         n = max(1, len(pages))
         side = (side or "right").lower()
         align = (align or "center").lower()
+        seam_scale = self._clamp(size_ratio, 0.03, 0.7, 0.18) / 0.18
+        seam_scale = self._clamp(seam_scale, 0.6, 2.2, 1.0)
 
         if side in ("left", "right"):
             step = src.width / n
@@ -277,7 +291,7 @@ class PDFBatchStampConverter:
                 sl = slices[idx]
                 sl_bytes = self._pil_to_png_bytes(sl)
                 pr = page.rect
-                target_w = pr.width * 0.14
+                target_w = pr.width * 0.14 * seam_scale
                 target_h = target_w * (sl.height / max(1, sl.width))
                 y = self._aligned_y(pr.height, target_h, align)
                 if side == "right":
@@ -299,7 +313,7 @@ class PDFBatchStampConverter:
                 sl = slices[idx]
                 sl_bytes = self._pil_to_png_bytes(sl)
                 pr = page.rect
-                target_h = pr.height * 0.14
+                target_h = pr.height * 0.14 * seam_scale
                 target_w = target_h * (sl.width / max(1, sl.height))
                 x = self._aligned_x(pr.width, target_w, align)
                 if side == "bottom":
@@ -327,6 +341,45 @@ class PDFBatchStampConverter:
         if not elems:
             return
 
+        # 先处理骑缝章元素（需要按整个页集切片）
+        allowed_page_set = set(pages)
+        for e in elems:
+            if not isinstance(e, dict):
+                continue
+            etype = str(e.get("type", "")).lower()
+            if etype != "seam":
+                continue
+            image_path = e.get("image_path", "")
+            if not image_path or not os.path.exists(image_path):
+                continue
+            scope = e.get("pages")
+            if isinstance(scope, list):
+                target_pages = []
+                seen = set()
+                for sp in scope:
+                    try:
+                        idx = int(sp) - 1
+                    except Exception:
+                        continue
+                    if idx in allowed_page_set and idx not in seen:
+                        seen.add(idx)
+                        target_pages.append(idx)
+            else:
+                target_pages = list(pages)
+            if not target_pages:
+                continue
+            self._apply_seam(
+                doc,
+                target_pages,
+                image_path=image_path,
+                side=str(e.get("side", "right")).lower(),
+                align=str(e.get("align", "center")).lower(),
+                overlap_ratio=self._clamp(e.get("overlap_ratio", 0.25), 0.05, 0.95, 0.25),
+                opacity=self._clamp(e.get("opacity", opacity_default), 0.05, 1.0, opacity_default),
+                remove_white_bg=remove_white_bg,
+                size_ratio=self._clamp(e.get("size_ratio", size_ratio_default), 0.03, 0.7, size_ratio_default),
+            )
+
         for p in pages:
             page = doc[p]
             page_no = p + 1
@@ -338,6 +391,8 @@ class PDFBatchStampConverter:
                 if isinstance(scope, list) and page_no not in scope:
                     continue
                 etype = str(e.get("type", "seal")).lower()
+                if etype == "seam":
+                    continue
                 x_ratio = self._clamp(e.get("x_ratio", 0.75), 0.0, 1.0, 0.75)
                 y_ratio = self._clamp(e.get("y_ratio", 0.75), 0.0, 1.0, 0.75)
                 w_ratio = self._clamp(e.get("w_ratio", size_ratio_default), 0.02, 0.95, size_ratio_default)
