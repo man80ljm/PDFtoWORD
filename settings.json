@@ -24,7 +24,7 @@
   "batch_image_dedupe": false,
   "batch_image_format": "原格式",
   "batch_zip_enabled": false,
-  "stamp_mode": "普通章",
+  "stamp_mode": "骑缝章",
   "stamp_pages": "",
   "stamp_opacity": "0.85",
   "stamp_position": "左上",
@@ -33,6 +33,13 @@
   "stamp_seam_side": "右侧",
   "stamp_seam_align": "居中",
   "stamp_seam_overlap": "0.25",
+  "stamp_remove_white_bg": true,
+  "stamp_preview_profile": {
+    "x_ratio": 0.85,
+    "y_ratio": 0.85,
+    "size_ratio": 0.18,
+    "opacity": 0.85
+  },
   "stamp_image_path": "D:/pythonProject/PDFtoWORD/dist/公章.png",
   "stamp_template_path": ""
 }

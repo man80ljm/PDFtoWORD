@@ -1,10 +1,11 @@
-"""
+﻿"""
 PDF转换工具主应用类
 
 负责：UI创建/布局、事件处理、进度追踪、设置加载保存、背景图片。
 转换逻辑委托给 converters/ 模块。
 """
 
+import io
 import json
 import logging
 import os
@@ -35,10 +36,16 @@ from converters.pdf_batch_extract import PDFBatchExtractConverter
 from converters.pdf_stamp_batch import PDFBatchStampConverter
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+try:
+    import fitz
+    FITZ_UI_AVAILABLE = True
+except ImportError:
+    FITZ_UI_AVAILABLE = False
 
 # 拖拽支持（可选依赖）
 try:
@@ -116,6 +123,10 @@ class PDFConverterApp:
         self.panel_image_id = None
         self.resize_job = None
         self.panel_resize_job = None
+        self.progress_y = 290
+        self.progress_text_y = 325
+        self.btn_y = 370
+        self.dnd_y = 410
 
         # --- 功能选择 ---
         self.current_function_var = tk.StringVar(value="PDF转Word")
@@ -178,6 +189,15 @@ class PDFConverterApp:
         self.stamp_seam_align_var = tk.StringVar(value="居中")
         self.stamp_seam_overlap_var = tk.StringVar(value="0.25")
         self.stamp_template_path = ""
+        self.stamp_remove_white_bg_var = tk.BooleanVar(value=False)
+        self.stamp_preview_info_var = tk.StringVar(value="")
+        self.stamp_preview_profile = {
+            "x_ratio": 0.85,
+            "y_ratio": 0.85,
+            "size_ratio": 0.18,
+            "opacity": 0.85,
+        }
+        self._stamp_preview_state = {}
 
         # --- API 配置 ---
         self.api_provider = "baidu"
@@ -598,14 +618,14 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_excel_hint, state='hidden')
 
-        # PDF批量文本/图片提取选项 (y=210)
+        # PDF批量文本/图片提取选项（分3行，避免固定窗口遮挡）
         self.batch_options_frame = tk.Frame(self.panel_canvas)
         tk.Checkbutton(self.batch_options_frame, text="文本",
                        variable=self.batch_text_enabled_var,
-                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 6))
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 8))
         tk.Checkbutton(self.batch_options_frame, text="图片",
                        variable=self.batch_image_enabled_var,
-                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 12))
         tk.Label(self.batch_options_frame, text="格式:",
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         ttk.Combobox(
@@ -620,12 +640,9 @@ class PDFConverterApp:
             values=["合并为一个文件", "每页一个文件"],
             state='readonly', width=8, font=("Microsoft YaHei", 9)
         ).pack(side=tk.LEFT, padx=(4, 0))
-        self.cv_batch_options = self.panel_canvas.create_window(
-            15, 210, window=self.batch_options_frame, anchor="nw"
-        )
+        self.cv_batch_options = self.panel_canvas.create_window(15, 210, window=self.batch_options_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_batch_options, state='hidden')
 
-        # PDF批量文本/图片提取选项 (y=245)
         self.batch_options2_frame = tk.Frame(self.panel_canvas)
         tk.Checkbutton(self.batch_options2_frame, text="保留换行",
                        variable=self.batch_preserve_layout_var,
@@ -636,36 +653,37 @@ class PDFConverterApp:
         tk.Label(self.batch_options2_frame, text="页码:",
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         tk.Entry(self.batch_options2_frame, textvariable=self.batch_pages_var,
-                 width=12, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 10))
-        tk.Checkbutton(self.batch_options2_frame, text="按页文件夹",
-                       variable=self.batch_image_per_page_var,
-                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Checkbutton(self.batch_options2_frame, text="图片去重",
-                       variable=self.batch_image_dedupe_var,
-                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(self.batch_options2_frame, text="图片格式:",
-                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
-        ttk.Combobox(
-            self.batch_options2_frame, textvariable=self.batch_image_format_var,
-            values=["原格式", "PNG", "JPEG"],
-            state='readonly', width=6, font=("Microsoft YaHei", 9)
-        ).pack(side=tk.LEFT, padx=(4, 0))
-        tk.Checkbutton(self.batch_options2_frame, text="打包ZIP",
-                       variable=self.batch_zip_enabled_var,
-                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(10, 0))
-        self.cv_batch_options2 = self.panel_canvas.create_window(
-            15, 245, window=self.batch_options2_frame, anchor="nw"
-        )
+                 width=16, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_batch_options2 = self.panel_canvas.create_window(15, 245, window=self.batch_options2_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_batch_options2, state='hidden')
 
-        # 批量提取提示 (y=270)
+        self.batch_options3_frame = tk.Frame(self.panel_canvas)
+        tk.Checkbutton(self.batch_options3_frame, text="按页文件夹",
+                       variable=self.batch_image_per_page_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(self.batch_options3_frame, text="图片去重",
+                       variable=self.batch_image_dedupe_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(self.batch_options3_frame, text="图片格式:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        ttk.Combobox(
+            self.batch_options3_frame, textvariable=self.batch_image_format_var,
+            values=["原格式", "PNG", "JPEG"],
+            state='readonly', width=6, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Checkbutton(self.batch_options3_frame, text="打包ZIP",
+                       variable=self.batch_zip_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 0))
+        self.cv_batch_options3 = self.panel_canvas.create_window(15, 280, window=self.batch_options3_frame, anchor="nw")
+        self.panel_canvas.itemconfigure(self.cv_batch_options3, state='hidden')
+
         self.cv_batch_hint = self.panel_canvas.create_text(
-            15, 270, text="页码格式示例：1,3,5-10（留空表示全部页）",
+            15, 305, text="页码格式示例：1,3,5-10 或 1，3，5-10（留空表示全部页）",
             font=("Microsoft YaHei", 8), anchor="nw", fill="#888888"
         )
         self.panel_canvas.itemconfigure(self.cv_batch_hint, state='hidden')
 
-        # PDF批量盖章选项 (y=210)
+        # PDF批量盖章选项（分4行，避免固定窗口遮挡）
         self.stamp_options_frame = tk.Frame(self.panel_canvas)
         tk.Label(self.stamp_options_frame, text="模式:",
                  font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
@@ -681,57 +699,76 @@ class PDFConverterApp:
                   cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
         self.stamp_image_label = tk.Label(self.stamp_options_frame, text="",
                                           font=("Microsoft YaHei", 8), fg="#666")
-        self.stamp_image_label.pack(side=tk.LEFT, padx=(0, 6))
+        self.stamp_image_label.pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(self.stamp_options_frame, text="模板...",
                   font=("Microsoft YaHei", 8), command=self._choose_stamp_template,
                   cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
         self.stamp_template_label = tk.Label(self.stamp_options_frame, text="",
                                              font=("Microsoft YaHei", 8), fg="#666")
         self.stamp_template_label.pack(side=tk.LEFT)
-        self.cv_stamp_options = self.panel_canvas.create_window(
-            15, 210, window=self.stamp_options_frame, anchor="nw"
-        )
+        self.cv_stamp_options = self.panel_canvas.create_window(15, 210, window=self.stamp_options_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_stamp_options, state='hidden')
 
-        # PDF批量盖章选项 (y=245)
         self.stamp_options2_frame = tk.Frame(self.panel_canvas)
         tk.Label(self.stamp_options2_frame, text="二维码内容:",
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         self.stamp_qr_entry = tk.Entry(self.stamp_options2_frame, textvariable=self.stamp_qr_text_var,
-                                       width=12, font=("Microsoft YaHei", 9))
-        self.stamp_qr_entry.pack(side=tk.LEFT, padx=(4, 8))
+                                       width=14, font=("Microsoft YaHei", 9))
+        self.stamp_qr_entry.pack(side=tk.LEFT, padx=(4, 10))
         tk.Label(self.stamp_options2_frame, text="页码:",
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         tk.Entry(self.stamp_options2_frame, textvariable=self.stamp_pages_var,
-                 width=10, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 8))
-        tk.Label(self.stamp_options2_frame, text="透明度:",
-                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
-        ttk.Combobox(
-            self.stamp_options2_frame, textvariable=self.stamp_opacity_var,
-            values=["0.3", "0.5", "0.7", "0.85", "1.0"],
-            state='readonly', width=5, font=("Microsoft YaHei", 9)
-        ).pack(side=tk.LEFT, padx=(4, 8))
-        tk.Label(self.stamp_options2_frame, text="位置:",
-                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
-        self.stamp_position_combo = ttk.Combobox(
-            self.stamp_options2_frame, textvariable=self.stamp_position_var,
-            values=["右下", "右上", "左下", "左上", "居中"],
-            state='readonly', width=5, font=("Microsoft YaHei", 9)
-        )
-        self.stamp_position_combo.pack(side=tk.LEFT, padx=(4, 0))
-        self.cv_stamp_options2 = self.panel_canvas.create_window(
-            15, 245, window=self.stamp_options2_frame, anchor="nw"
-        )
+                 width=14, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Checkbutton(self.stamp_options2_frame, text="去白底",
+                       variable=self.stamp_remove_white_bg_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 0))
+        self.cv_stamp_options2 = self.panel_canvas.create_window(15, 245, window=self.stamp_options2_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_stamp_options2, state='hidden')
 
-        # 批量盖章提示 (y=270)
+        self.stamp_options3_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.stamp_options3_frame, text="骑缝边:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.stamp_seam_side_combo = ttk.Combobox(
+            self.stamp_options3_frame, textvariable=self.stamp_seam_side_var,
+            values=["右侧", "左侧", "顶部", "底部"],
+            state='readonly', width=5, font=("Microsoft YaHei", 9)
+        )
+        self.stamp_seam_side_combo.pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.stamp_options3_frame, text="对齐:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.stamp_seam_align_combo = ttk.Combobox(
+            self.stamp_options3_frame, textvariable=self.stamp_seam_align_var,
+            values=["居中", "顶部", "底部"],
+            state='readonly', width=5, font=("Microsoft YaHei", 9)
+        )
+        self.stamp_seam_align_combo.pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.stamp_options3_frame, text="压边比例:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.stamp_seam_overlap_entry = tk.Entry(
+            self.stamp_options3_frame, textvariable=self.stamp_seam_overlap_var,
+            width=6, font=("Microsoft YaHei", 9)
+        )
+        self.stamp_seam_overlap_entry.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_stamp_options3 = self.panel_canvas.create_window(15, 280, window=self.stamp_options3_frame, anchor="nw")
+        self.panel_canvas.itemconfigure(self.cv_stamp_options3, state='hidden')
+
+        self.stamp_options4_frame = tk.Frame(self.panel_canvas)
+        self.stamp_preview_btn = tk.Button(
+            self.stamp_options4_frame, text="预览设置...",
+            font=("Microsoft YaHei", 8), command=self._open_stamp_preview,
+            cursor='hand2'
+        )
+        self.stamp_preview_btn.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(self.stamp_options4_frame, textvariable=self.stamp_preview_info_var,
+                 font=("Microsoft YaHei", 8), fg="#666").pack(side=tk.LEFT)
+        self.cv_stamp_options4 = self.panel_canvas.create_window(15, 315, window=self.stamp_options4_frame, anchor="nw")
+        self.panel_canvas.itemconfigure(self.cv_stamp_options4, state='hidden')
+
         self.stamp_hint_var = tk.StringVar(value="")
         self.stamp_hint_frame = tk.Frame(self.panel_canvas)
         tk.Label(self.stamp_hint_frame, textvariable=self.stamp_hint_var,
                  font=("Microsoft YaHei", 8), fg="#888888").pack(anchor=tk.W)
-        self.cv_stamp_hint = self.panel_canvas.create_window(
-            15, 270, window=self.stamp_hint_frame, anchor="nw"
-        )
+        self.cv_stamp_hint = self.panel_canvas.create_window(15, 340, window=self.stamp_hint_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_stamp_hint, state='hidden')
 
         # API状态提示
@@ -742,12 +779,12 @@ class PDFConverterApp:
         # 进度条
         self.progress_bar = ttk.Progressbar(self.panel_canvas, mode='determinate')
         self.cv_progress_bar = self.panel_canvas.create_window(
-            20, 290, window=self.progress_bar, anchor="nw", width=1, height=25
+            20, self.progress_y, window=self.progress_bar, anchor="nw", width=1, height=25
         )
 
         # 进度文本
         self.cv_progress_text = self.panel_canvas.create_text(
-            0, 325, text="", font=("Microsoft YaHei", 9), anchor="n"
+            0, self.progress_text_y, text="", font=("Microsoft YaHei", 9), anchor="n"
         )
 
         # 按钮
@@ -762,13 +799,13 @@ class PDFConverterApp:
             font=("Microsoft YaHei", 12), padx=40, pady=12, cursor='hand2'
         ).pack(side=tk.LEFT, expand=True, padx=5)
         self.cv_btn_frame = self.panel_canvas.create_window(
-            0, 370, window=btn_frame, anchor="n"
+            0, self.btn_y, window=btn_frame, anchor="n"
         )
 
         # 拖拽提示
         dnd_text = "支持拖拽文件到窗口" if WINDND_AVAILABLE else ""
         self.cv_dnd_hint = self.panel_canvas.create_text(
-            0, 410, text=dnd_text, font=("Microsoft YaHei", 8),
+            0, self.dnd_y, text=dnd_text, font=("Microsoft YaHei", 8),
             anchor="n", fill="#aaaaaa"
         )
 
@@ -778,6 +815,7 @@ class PDFConverterApp:
             font=("Microsoft YaHei", 9), anchor="sw"
         )
         self.status_message.trace_add("write", self._on_status_var_changed)
+        self._update_stamp_preview_info()
 
         # 事件绑定
         self.root.bind("<Configure>", self.on_root_resize)
@@ -832,16 +870,19 @@ class PDFConverterApp:
         self.panel_canvas.coords(self.cv_excel_hint, 15, 270)
         self.panel_canvas.coords(self.cv_batch_options, 15, 210)
         self.panel_canvas.coords(self.cv_batch_options2, 15, 245)
-        self.panel_canvas.coords(self.cv_batch_hint, 15, 270)
+        self.panel_canvas.coords(self.cv_batch_options3, 15, 280)
+        self.panel_canvas.coords(self.cv_batch_hint, 15, 305)
         self.panel_canvas.coords(self.cv_stamp_options, 15, 210)
         self.panel_canvas.coords(self.cv_stamp_options2, 15, 245)
-        self.panel_canvas.coords(self.cv_stamp_hint, 15, 270)
+        self.panel_canvas.coords(self.cv_stamp_options3, 15, 280)
+        self.panel_canvas.coords(self.cv_stamp_options4, 15, 315)
+        self.panel_canvas.coords(self.cv_stamp_hint, 15, 340)
         self.panel_canvas.coords(self.cv_api_hint, 15, 270)
-        self.panel_canvas.coords(self.cv_progress_bar, 20, 290)
+        self.panel_canvas.coords(self.cv_progress_bar, 20, self.progress_y)
         self.panel_canvas.itemconfigure(self.cv_progress_bar, width=w - 40)
-        self.panel_canvas.coords(self.cv_progress_text, cx, 325)
-        self.panel_canvas.coords(self.cv_btn_frame, cx, 370)
-        self.panel_canvas.coords(self.cv_dnd_hint, cx, 410)
+        self.panel_canvas.coords(self.cv_progress_text, cx, self.progress_text_y)
+        self.panel_canvas.coords(self.cv_btn_frame, cx, self.btn_y)
+        self.panel_canvas.coords(self.cv_dnd_hint, cx, self.dnd_y)
         self.panel_canvas.coords(self.cv_status_text, 15, h - 10)
 
     # ==========================================================
@@ -850,6 +891,10 @@ class PDFConverterApp:
 
     def _on_function_changed(self, event=None):
         func = self.current_function_var.get()
+        self.progress_y = 290
+        self.progress_text_y = 325
+        self.btn_y = 370
+        self.dnd_y = 410
 
         # 先隐藏所有可选区域
         for cv_item in [self.cv_formula_frame, self.cv_api_hint,
@@ -860,8 +905,8 @@ class PDFConverterApp:
                         self.cv_compress_options, self.cv_compress_hint,
                         self.cv_extract_options, self.cv_extract_hint,
                         self.cv_excel_options, self.cv_excel_mode, self.cv_excel_hint,
-                        self.cv_batch_options, self.cv_batch_options2, self.cv_batch_hint,
-                        self.cv_stamp_options, self.cv_stamp_options2, self.cv_stamp_hint]:
+                        self.cv_batch_options, self.cv_batch_options2, self.cv_batch_options3, self.cv_batch_hint,
+                        self.cv_stamp_options, self.cv_stamp_options2, self.cv_stamp_options3, self.cv_stamp_options4, self.cv_stamp_hint]:
             self.panel_canvas.itemconfigure(cv_item, state='hidden')
 
         title_prefix = self.title_text_var.get().split(' - ')[0] if ' - ' in self.title_text_var.get() else self.title_text_var.get()
@@ -968,9 +1013,14 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
             self.panel_canvas.itemconfigure(self.cv_batch_options, state='normal')
             self.panel_canvas.itemconfigure(self.cv_batch_options2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_batch_options3, state='normal')
             self.panel_canvas.itemconfigure(self.cv_batch_hint, state='normal')
             self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件（可多选）")
             self.panel_canvas.itemconfigure(self.cv_section2, text="批量提取选项")
+            self.progress_y = 335
+            self.progress_text_y = 370
+            self.btn_y = 415
+            self.dnd_y = 455
             self.root.title(f"{title_prefix} - PDF批量文本/图片提取")
 
         if func == "PDF批量盖章":
@@ -978,11 +1028,19 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
             self.panel_canvas.itemconfigure(self.cv_stamp_options, state='normal')
             self.panel_canvas.itemconfigure(self.cv_stamp_options2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_stamp_options3, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_stamp_options4, state='normal')
             self.panel_canvas.itemconfigure(self.cv_stamp_hint, state='normal')
             self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件（可多选）")
             self.panel_canvas.itemconfigure(self.cv_section2, text="批量盖章选项")
+            self.progress_y = 370
+            self.progress_text_y = 405
+            self.btn_y = 450
+            self.dnd_y = 490
             self._on_stamp_mode_changed()
             self.root.title(f"{title_prefix} - PDF批量盖章")
+
+        self.layout_canvas()
 
         self.selected_file.set("")
         self.selected_files_list = []
@@ -1003,6 +1061,7 @@ class PDFConverterApp:
             self.stamp_image_path = filename
             name = os.path.basename(filename)
             self.stamp_image_label.config(text=name if len(name) <= 16 else name[:13] + "...")
+            self._update_stamp_preview_info()
             self.save_settings()
 
     def _choose_stamp_template(self):
@@ -1014,20 +1073,379 @@ class PDFConverterApp:
             self.stamp_template_path = filename
             name = os.path.basename(filename)
             self.stamp_template_label.config(text=name if len(name) <= 16 else name[:13] + "...")
+            self._update_stamp_preview_info()
             self.save_settings()
 
-    def _on_stamp_mode_changed(self, event=None):
-        mode = self.stamp_mode_var.get()
-        if mode == "普通章":
-            self.stamp_hint_var.set("普通章：每页盖完整章图，可设置位置、透明度、尺寸。")
-        elif mode == "二维码":
-            self.stamp_hint_var.set("二维码：根据输入内容自动生成二维码并盖章。")
-        elif mode == "骑缝章":
-            self.stamp_hint_var.set("骑缝章：章图按页切片后盖在页边。")
+    @staticmethod
+    def _clamp_value(value, min_value, max_value, default):
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = float(default)
+        if numeric < min_value:
+            return min_value
+        if numeric > max_value:
+            return max_value
+        return numeric
+
+    def _get_stamp_mode_key(self):
+        mode_map = {
+            "普通章": "seal",
+            "二维码": "qr",
+            "骑缝章": "seam",
+            "模板": "template",
+        }
+        return mode_map.get(self.stamp_mode_var.get(), "seal")
+
+    def _update_stamp_preview_info(self):
+        mode_key = self._get_stamp_mode_key()
+        profile = self.stamp_preview_profile or {}
+        x_ratio = self._clamp_value(profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85)
+        y_ratio = self._clamp_value(profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85)
+        opacity = self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85)
+        if mode_key == "seam":
+            self.stamp_preview_info_var.set(f"骑缝预览透明度 {opacity:.2f}")
+        elif mode_key == "template":
+            self.stamp_preview_info_var.set(f"模板预览透明度 {opacity:.2f}")
         else:
-            self.stamp_hint_var.set("模板：按 JSON 模板批量盖章（seal/qr/text）。")
-        self.stamp_qr_entry.config(state=('normal' if mode == "二维码" else 'disabled'))
-        self.stamp_position_combo.config(state=('disabled' if mode == "骑缝章" else 'readonly'))
+            self.stamp_preview_info_var.set(f"位置({x_ratio:.2f},{y_ratio:.2f}) 透明度 {opacity:.2f}")
+
+    def _resolve_preview_pdf(self):
+        if self.selected_files_list:
+            first = self.selected_files_list[0]
+            if os.path.exists(first) and first.lower().endswith(".pdf"):
+                return first
+        selected = (self.selected_file.get() or "").strip()
+        if selected and os.path.exists(selected) and selected.lower().endswith(".pdf"):
+            return selected
+        return None
+
+    def _build_template_preview_image(self, opacity):
+        if not self.stamp_template_path or not os.path.exists(self.stamp_template_path):
+            return None
+        try:
+            with open(self.stamp_template_path, "r", encoding="utf-8") as f:
+                template = json.load(f)
+        except Exception:
+            return None
+
+        elements = template.get("elements", [])
+        for elem in elements:
+            elem_type = str(elem.get("type", "")).strip().lower()
+            if elem_type == "seal":
+                image_path = str(elem.get("image_path", "")).strip()
+                if image_path and os.path.exists(image_path):
+                    image = Image.open(image_path).convert("RGBA")
+                    if self.stamp_remove_white_bg_var.get():
+                        image = PDFBatchStampConverter._remove_white_background(image)
+                    return PDFBatchStampConverter._apply_alpha(image, opacity)
+            elif elem_type == "qr":
+                text = str(elem.get("text", "")).strip()
+                if text:
+                    try:
+                        qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
+                            text,
+                            opacity=opacity,
+                            remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+                        )
+                        return Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                    except Exception:
+                        return None
+            elif elem_type == "text":
+                text = str(elem.get("text", "")).strip()
+                if text:
+                    image = Image.new("RGBA", (520, 120), (255, 255, 255, 0))
+                    draw = ImageDraw.Draw(image)
+                    draw.text((10, 40), text, fill=(220, 0, 0, 255))
+                    return PDFBatchStampConverter._apply_alpha(image, opacity)
+        return None
+
+    def _open_stamp_preview(self):
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("提示", "预览需要 Pillow 依赖。")
+            return
+        if not FITZ_UI_AVAILABLE:
+            messagebox.showwarning("提示", "预览需要 PyMuPDF 依赖。")
+            return
+
+        mode_key = self._get_stamp_mode_key()
+        if mode_key in ("seal", "seam") and not (self.stamp_image_path and os.path.exists(self.stamp_image_path)):
+            messagebox.showwarning("提示", "请先选择章图。")
+            return
+        if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
+            messagebox.showwarning("提示", "请先填写二维码内容。")
+            return
+        if mode_key == "template" and not (self.stamp_template_path and os.path.exists(self.stamp_template_path)):
+            messagebox.showwarning("提示", "请先选择模板 JSON。")
+            return
+
+        source_pdf = self._resolve_preview_pdf()
+        if not source_pdf:
+            messagebox.showwarning("提示", "请先选择至少一个 PDF 文件，再打开预览。")
+            return
+
+        try:
+            doc = fitz.open(source_pdf)
+            if len(doc) == 0:
+                doc.close()
+                messagebox.showwarning("提示", "该PDF没有可预览的页面。")
+                return
+            first_page = doc[0]
+            page_rect = first_page.rect
+            page_width_pt = float(page_rect.width)
+            page_height_pt = float(page_rect.height)
+            page_count = len(doc)
+            pix = first_page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            page_image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            doc.close()
+        except Exception as exc:
+            messagebox.showerror("预览失败", f"读取PDF预览失败：\n{exc}")
+            return
+
+        max_w, max_h = 760, 500
+        scale = min(max_w / page_image.width, max_h / page_image.height, 1.0)
+        disp_w = max(1, int(page_image.width * scale))
+        disp_h = max(1, int(page_image.height * scale))
+        if scale < 0.999:
+            page_display = page_image.resize((disp_w, disp_h), Image.LANCZOS)
+        else:
+            page_display = page_image.copy()
+
+        profile = {
+            "x_ratio": self._clamp_value(self.stamp_preview_profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+            "y_ratio": self._clamp_value(self.stamp_preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+            "size_ratio": self._clamp_value(self.stamp_preview_profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
+            "opacity": self._clamp_value(self.stamp_preview_profile.get("opacity", 0.85), 0.05, 1.0, 0.85),
+        }
+        pad = 30
+        state = {
+            "dragging": False,
+            "drag_offset_x": 0.0,
+            "drag_offset_y": 0.0,
+            "stamp_bbox": None,
+            "page_tk": None,
+            "stamp_tk": None,
+        }
+
+        preview_win = tk.Toplevel(self.root)
+        preview_win.title("盖章预览")
+        preview_win.geometry("920x720")
+        preview_win.resizable(False, False)
+        preview_win.transient(self.root)
+        preview_win.grab_set()
+
+        info_text = f"预览文件：{os.path.basename(source_pdf)}  第1页 / 共{page_count}页"
+        tk.Label(preview_win, text=info_text, font=("Microsoft YaHei", 9), fg="#666").pack(anchor="w", padx=12, pady=(10, 4))
+
+        control_frame = tk.Frame(preview_win)
+        control_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+        tk.Label(control_frame, text="透明度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        opacity_var = tk.DoubleVar(value=profile["opacity"] * 100.0)
+        opacity_scale = tk.Scale(
+            control_frame,
+            from_=5,
+            to=100,
+            orient=tk.HORIZONTAL,
+            resolution=1,
+            showvalue=True,
+            variable=opacity_var,
+            length=240,
+        )
+        opacity_scale.pack(side=tk.LEFT, padx=(6, 12))
+        tk.Label(control_frame, text="拖动预览章图可调整位置（普通章/二维码）", font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.LEFT)
+
+        canvas_frame = tk.Frame(preview_win, bg="#f5f5f5")
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        canvas = tk.Canvas(
+            canvas_frame,
+            width=disp_w + pad * 2,
+            height=disp_h + pad * 2,
+            bg="#f5f5f5",
+            highlightthickness=1,
+            highlightbackground="#cccccc",
+        )
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        def build_stamp_image(opacity):
+            if mode_key == "seal":
+                image = Image.open(self.stamp_image_path).convert("RGBA")
+                if self.stamp_remove_white_bg_var.get():
+                    image = PDFBatchStampConverter._remove_white_background(image)
+                return PDFBatchStampConverter._apply_alpha(image, opacity)
+            if mode_key == "qr":
+                try:
+                    qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
+                        self.stamp_qr_text_var.get().strip(),
+                        opacity=opacity,
+                        remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+                    )
+                    return Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                except Exception:
+                    return None
+            if mode_key == "seam":
+                image = Image.open(self.stamp_image_path).convert("RGBA")
+                if self.stamp_remove_white_bg_var.get():
+                    image = PDFBatchStampConverter._remove_white_background(image)
+                image = PDFBatchStampConverter._apply_alpha(image, opacity)
+                n_pages = max(1, page_count)
+                side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(
+                    self.stamp_seam_side_var.get(), "right"
+                )
+                if side in ("left", "right"):
+                    step = image.width / n_pages
+                    x1 = 0
+                    x2 = max(x1 + 1, int(round(step)))
+                    return image.crop((x1, 0, x2, image.height))
+                step = image.height / n_pages
+                y1 = 0
+                y2 = max(y1 + 1, int(round(step)))
+                return image.crop((0, y1, image.width, y2))
+            return self._build_template_preview_image(opacity)
+
+        def draw_preview():
+            profile["opacity"] = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.85)
+            canvas.delete("all")
+
+            state["page_tk"] = ImageTk.PhotoImage(page_display)
+            canvas.create_image(pad, pad, anchor="nw", image=state["page_tk"])
+            canvas.create_rectangle(pad, pad, pad + disp_w, pad + disp_h, outline="#bbbbbb")
+
+            stamp_image = build_stamp_image(profile["opacity"])
+            if stamp_image is None:
+                canvas.create_text(pad + disp_w / 2, pad + disp_h / 2, text="当前模式无可预览章图", fill="#999999")
+                state["stamp_bbox"] = None
+                return
+
+            if mode_key in ("seal", "qr"):
+                target_w = max(16, int(disp_w * profile["size_ratio"]))
+                target_h = max(16, int(target_w * stamp_image.height / max(1, stamp_image.width)))
+                stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
+
+                center_x = pad + profile["x_ratio"] * disp_w
+                center_y = pad + profile["y_ratio"] * disp_h
+                x = center_x - target_w / 2
+                y = center_y - target_h / 2
+                x = max(pad, min(x, pad + disp_w - target_w))
+                y = max(pad, min(y, pad + disp_h - target_h))
+                center_x = x + target_w / 2
+                center_y = y + target_h / 2
+                profile["x_ratio"] = self._clamp_value((center_x - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
+                profile["y_ratio"] = self._clamp_value((center_y - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+
+                state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
+                canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"], tags=("stamp",))
+                state["stamp_bbox"] = (x, y, x + target_w, y + target_h)
+                return
+
+            if mode_key == "seam":
+                side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(
+                    self.stamp_seam_side_var.get(), "right"
+                )
+                align = {"居中": "center", "顶部": "top", "底部": "bottom"}.get(
+                    self.stamp_seam_align_var.get(), "center"
+                )
+                overlap = self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25)
+                if side in ("left", "right"):
+                    target_h = max(10, int(disp_h / max(1, page_count)))
+                    target_w = max(10, int(target_h * stamp_image.width / max(1, stamp_image.height)))
+                    y = pad if align == "top" else (pad + disp_h - target_h if align == "bottom" else pad + (disp_h - target_h) / 2)
+                    x = pad + disp_w - target_w * (1.0 - overlap) if side == "right" else pad - target_w * overlap
+                else:
+                    target_w = max(10, int(disp_w / max(1, page_count)))
+                    target_h = max(10, int(target_w * stamp_image.height / max(1, stamp_image.width)))
+                    x = pad if align == "top" else (pad + disp_w - target_w if align == "bottom" else pad + (disp_w - target_w) / 2)
+                    y = pad - target_h * overlap if side == "top" else pad + disp_h - target_h * (1.0 - overlap)
+                stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
+                state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
+                canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"])
+                state["stamp_bbox"] = None
+                return
+
+            target_w = max(16, int(disp_w * profile["size_ratio"]))
+            target_h = max(16, int(target_w * stamp_image.height / max(1, stamp_image.width)))
+            stamp_display = stamp_image.resize((target_w, target_h), Image.LANCZOS)
+            x = pad + (disp_w - target_w) / 2
+            y = pad + (disp_h - target_h) / 2
+            state["stamp_tk"] = ImageTk.PhotoImage(stamp_display)
+            canvas.create_image(int(x), int(y), anchor="nw", image=state["stamp_tk"])
+            state["stamp_bbox"] = None
+
+        def on_press(event):
+            if mode_key not in ("seal", "qr"):
+                return
+            bbox = state.get("stamp_bbox")
+            if not bbox:
+                return
+            x1, y1, x2, y2 = bbox
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                state["dragging"] = True
+                state["drag_offset_x"] = event.x - (x1 + x2) / 2
+                state["drag_offset_y"] = event.y - (y1 + y2) / 2
+
+        def on_drag(event):
+            if mode_key not in ("seal", "qr") or not state.get("dragging"):
+                return
+            bbox = state.get("stamp_bbox")
+            if not bbox:
+                return
+            width = bbox[2] - bbox[0]
+            height = bbox[3] - bbox[1]
+            center_x = event.x - state["drag_offset_x"]
+            center_y = event.y - state["drag_offset_y"]
+            center_x = max(pad + width / 2, min(center_x, pad + disp_w - width / 2))
+            center_y = max(pad + height / 2, min(center_y, pad + disp_h - height / 2))
+            profile["x_ratio"] = self._clamp_value((center_x - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
+            profile["y_ratio"] = self._clamp_value((center_y - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+            draw_preview()
+
+        def on_release(_event):
+            state["dragging"] = False
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        opacity_scale.configure(command=lambda _v: draw_preview())
+
+        action_frame = tk.Frame(preview_win)
+        action_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def apply_preview():
+            self.stamp_preview_profile = {
+                "x_ratio": self._clamp_value(profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+                "y_ratio": self._clamp_value(profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+                "size_ratio": self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
+                "opacity": self._clamp_value(profile.get("opacity", 0.85), 0.05, 1.0, 0.85),
+            }
+            self.stamp_opacity_var.set(f"{self.stamp_preview_profile['opacity']:.2f}")
+            self._update_stamp_preview_info()
+            self.save_settings()
+            preview_win.destroy()
+
+        tk.Button(action_frame, text="取消", command=preview_win.destroy,
+                  font=("Microsoft YaHei", 9), width=12).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(action_frame, text="应用到批量盖章", command=apply_preview,
+                  font=("Microsoft YaHei", 9, "bold"), width=14).pack(side=tk.RIGHT)
+
+        draw_preview()
+
+    def _on_stamp_mode_changed(self, event=None):
+        mode_key = self._get_stamp_mode_key()
+        if mode_key == "seal":
+            self.stamp_hint_var.set("普通章：在预览窗口拖拽位置，透明度在预览中调整。")
+        elif mode_key == "qr":
+            self.stamp_hint_var.set("二维码：输入内容后可在预览中拖拽位置并调整透明度。")
+        elif mode_key == "seam":
+            self.stamp_hint_var.set("骑缝章：在预览中查看切片效果，设置骑缝边/对齐/压边比例。")
+        else:
+            self.stamp_hint_var.set("模板：按 JSON 模板批量盖章；可预览模板元素效果。")
+
+        self.stamp_qr_entry.config(state=('normal' if mode_key == "qr" else 'disabled'))
+        seam_state = 'readonly' if mode_key == "seam" else 'disabled'
+        self.stamp_seam_side_combo.config(state=seam_state)
+        self.stamp_seam_align_combo.config(state=seam_state)
+        self.stamp_seam_overlap_entry.config(state=('normal' if mode_key == "seam" else 'disabled'))
+
+        self._update_stamp_preview_info()
         self.save_settings()
 
     def _on_split_mode_changed(self, event=None):
@@ -1423,14 +1841,14 @@ class PDFConverterApp:
                     messagebox.showwarning("提示", "请至少选择文本或图片提取！")
                     return
             if func == "PDF批量盖章":
-                mode = self.stamp_mode_var.get()
-                if mode in ("普通章", "骑缝章") and not self.stamp_image_path:
+                mode_key = self._get_stamp_mode_key()
+                if mode_key in ("seal", "seam") and not self.stamp_image_path:
                     messagebox.showwarning("提示", "请先选择章图文件。")
                     return
-                if mode == "二维码" and not self.stamp_qr_text_var.get().strip():
+                if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
                     messagebox.showwarning("提示", "请填写二维码内容。")
                     return
-                if mode == "模板" and not self.stamp_template_path:
+                if mode_key == "template" and not self.stamp_template_path:
                     messagebox.showwarning("提示", "请先选择模板JSON。")
                     return
 
@@ -1680,35 +2098,42 @@ class PDFConverterApp:
             mode='determinate', maximum=100, value=0))
         self.start_time = time.time()
 
-        mode_map = {
-            "普通章": "seal",
-            "二维码": "qr",
-            "骑缝章": "seam",
-            "模板": "template",
-        }
-        position_map = {
-            "右下": "right_bottom",
-            "右上": "right_top",
-            "左下": "left_bottom",
-            "左上": "left_top",
-            "居中": "center",
-        }
+        mode_key = self._get_stamp_mode_key()
         seam_side_map = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}
         seam_align_map = {"居中": "center", "顶部": "top", "底部": "bottom"}
+        opacity_value = self._clamp_value(
+            self.stamp_preview_profile.get("opacity", self.stamp_opacity_var.get()),
+            0.05,
+            1.0,
+            0.85,
+        )
+        size_ratio = self._clamp_value(
+            self.stamp_preview_profile.get("size_ratio", 0.18),
+            0.03,
+            0.7,
+            0.18,
+        )
+        placement = {
+            "x_ratio": self._clamp_value(self.stamp_preview_profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+            "y_ratio": self._clamp_value(self.stamp_preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+            "size_ratio": size_ratio,
+        }
 
         result = converter.convert(
             files=list(self.selected_files_list),
-            mode=mode_map.get(self.stamp_mode_var.get(), "seal"),
+            mode=mode_key,
             pages_str=self.stamp_pages_var.get().strip(),
-            opacity=self.stamp_opacity_var.get().strip() or "0.85",
-            position=position_map.get(self.stamp_position_var.get(), "right_bottom"),
-            size_ratio=self.stamp_size_ratio_var.get().strip() or "0.18",
+            opacity=opacity_value,
+            position="right_bottom",
+            size_ratio=size_ratio,
             seal_image_path=self.stamp_image_path,
             qr_text=self.stamp_qr_text_var.get().strip(),
             seam_side=seam_side_map.get(self.stamp_seam_side_var.get(), "right"),
             seam_align=seam_align_map.get(self.stamp_seam_align_var.get(), "center"),
             seam_overlap_ratio=self.stamp_seam_overlap_var.get().strip() or "0.25",
             template_path=self.stamp_template_path,
+            placement=placement,
+            remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
         )
 
         self.history.add({
@@ -2728,6 +3153,23 @@ class PDFConverterApp:
             self.stamp_seam_side_var.set(data.get('stamp_seam_side', '右侧'))
             self.stamp_seam_align_var.set(data.get('stamp_seam_align', '居中'))
             self.stamp_seam_overlap_var.set(str(data.get('stamp_seam_overlap', '0.25')))
+            self.stamp_remove_white_bg_var.set(bool(data.get('stamp_remove_white_bg', False)))
+            preview_profile = data.get('stamp_preview_profile', {})
+            if isinstance(preview_profile, dict):
+                self.stamp_preview_profile = {
+                    "x_ratio": self._clamp_value(preview_profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+                    "y_ratio": self._clamp_value(preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+                    "size_ratio": self._clamp_value(preview_profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
+                    "opacity": self._clamp_value(preview_profile.get("opacity", self.stamp_opacity_var.get()), 0.05, 1.0, 0.85),
+                }
+            else:
+                self.stamp_preview_profile = {
+                    "x_ratio": 0.85,
+                    "y_ratio": 0.85,
+                    "size_ratio": self._clamp_value(self.stamp_size_ratio_var.get(), 0.03, 0.7, 0.18),
+                    "opacity": self._clamp_value(self.stamp_opacity_var.get(), 0.05, 1.0, 0.85),
+                }
+            self.stamp_opacity_var.set(f"{self.stamp_preview_profile.get('opacity', 0.85):.2f}")
             self.stamp_image_path = data.get('stamp_image_path', '') or ''
             self.stamp_template_path = data.get('stamp_template_path', '') or ''
             if self.stamp_image_path and os.path.exists(self.stamp_image_path):
@@ -2739,6 +3181,7 @@ class PDFConverterApp:
             if self.bg_image_path:
                 self.apply_background_image()
             self._on_stamp_mode_changed()
+            self._update_stamp_preview_info()
             self._update_api_hint()
         except Exception:
             pass
@@ -2779,6 +3222,13 @@ class PDFConverterApp:
             'stamp_seam_side': self.stamp_seam_side_var.get(),
             'stamp_seam_align': self.stamp_seam_align_var.get(),
             'stamp_seam_overlap': self.stamp_seam_overlap_var.get(),
+            'stamp_remove_white_bg': bool(self.stamp_remove_white_bg_var.get()),
+            'stamp_preview_profile': {
+                'x_ratio': self._clamp_value(self.stamp_preview_profile.get("x_ratio", 0.85), 0.0, 1.0, 0.85),
+                'y_ratio': self._clamp_value(self.stamp_preview_profile.get("y_ratio", 0.85), 0.0, 1.0, 0.85),
+                'size_ratio': self._clamp_value(self.stamp_preview_profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18),
+                'opacity': self._clamp_value(self.stamp_preview_profile.get("opacity", self.stamp_opacity_var.get()), 0.05, 1.0, 0.85),
+            },
             'stamp_image_path': self.stamp_image_path,
             'stamp_template_path': self.stamp_template_path,
         }

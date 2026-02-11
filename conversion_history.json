@@ -4,6 +4,39 @@
     "input_files": [
       "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
     ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_盖章_20260211_151917.pdf",
+    "success": true,
+    "message": "Batch stamping completed\nSuccess files: 1\nStamped pages: 9\nWarnings: 0",
+    "page_count": 9,
+    "timestamp": "2026-02-11 15:19:17"
+  },
+  {
+    "function": "PDF批量盖章",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_盖章_20260211_151700.pdf",
+    "success": true,
+    "message": "Batch stamping completed\nSuccess files: 1\nStamped pages: 9\nWarnings: 0",
+    "page_count": 9,
+    "timestamp": "2026-02-11 15:17:00"
+  },
+  {
+    "function": "PDF批量盖章",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_盖章_20260211_151443.pdf",
+    "success": true,
+    "message": "Batch stamping completed\nSuccess files: 1\nStamped pages: 9\nWarnings: 0",
+    "page_count": 9,
+    "timestamp": "2026-02-11 15:14:43"
+  },
+  {
+    "function": "PDF批量盖章",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
     "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_盖章_20260211_142031.pdf",
     "success": true,
     "message": "Batch stamping completed\nSuccess files: 1\nStamped pages: 9\nWarnings: 0",
