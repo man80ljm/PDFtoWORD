@@ -12,7 +12,7 @@
   "image_format": "PNG",
   "split_mode": "每页一个PDF",
   "page_size": "A4",
-  "excel_extract_mode": "OCR提取",
+  "excel_extract_mode": "结构提取",
   "batch_text_enabled": true,
   "batch_image_enabled": true,
   "batch_text_format": "txt",
@@ -23,5 +23,16 @@
   "batch_image_per_page": false,
   "batch_image_dedupe": false,
   "batch_image_format": "原格式",
-  "batch_zip_enabled": false
+  "batch_zip_enabled": false,
+  "stamp_mode": "普通章",
+  "stamp_pages": "",
+  "stamp_opacity": "0.85",
+  "stamp_position": "左上",
+  "stamp_size_ratio": "0.18",
+  "stamp_qr_text": "",
+  "stamp_seam_side": "右侧",
+  "stamp_seam_align": "居中",
+  "stamp_seam_overlap": "0.25",
+  "stamp_image_path": "D:/pythonProject/PDFtoWORD/dist/公章.png",
+  "stamp_template_path": ""
 }

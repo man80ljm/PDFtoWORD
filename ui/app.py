@@ -32,6 +32,7 @@ from converters.pdf_extract import PDFExtractConverter
 from converters.pdf_ocr import PDFOCRConverter
 from converters.pdf_to_excel import PDFToExcelConverter, TABLE_STRATEGIES
 from converters.pdf_batch_extract import PDFBatchExtractConverter
+from converters.pdf_stamp_batch import PDFBatchStampConverter
 
 try:
     from PIL import Image, ImageTk
@@ -48,7 +49,7 @@ except ImportError:
 
 
 # 所有支持的功能列表
-ALL_FUNCTIONS = ["PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF", "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取"]
+ALL_FUNCTIONS = ["PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF", "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取", "PDF批量盖章"]
 
 
 class PDFConverterApp:
@@ -164,6 +165,19 @@ class PDFConverterApp:
         self.batch_image_dedupe_var = tk.BooleanVar(value=False)
         self.batch_image_format_var = tk.StringVar(value="原格式")
         self.batch_zip_enabled_var = tk.BooleanVar(value=False)
+
+        # --- 批量盖章选项 ---
+        self.stamp_mode_var = tk.StringVar(value="普通章")
+        self.stamp_pages_var = tk.StringVar()
+        self.stamp_opacity_var = tk.StringVar(value="0.85")
+        self.stamp_position_var = tk.StringVar(value="右下")
+        self.stamp_size_ratio_var = tk.StringVar(value="0.18")
+        self.stamp_image_path = ""
+        self.stamp_qr_text_var = tk.StringVar()
+        self.stamp_seam_side_var = tk.StringVar(value="右侧")
+        self.stamp_seam_align_var = tk.StringVar(value="居中")
+        self.stamp_seam_overlap_var = tk.StringVar(value="0.25")
+        self.stamp_template_path = ""
 
         # --- API 配置 ---
         self.api_provider = "baidu"
@@ -651,6 +665,75 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_batch_hint, state='hidden')
 
+        # PDF批量盖章选项 (y=210)
+        self.stamp_options_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.stamp_options_frame, text="模式:",
+                 font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
+        self.stamp_mode_combo = ttk.Combobox(
+            self.stamp_options_frame, textvariable=self.stamp_mode_var,
+            values=["普通章", "二维码", "骑缝章", "模板"],
+            state='readonly', width=7, font=("Microsoft YaHei", 9)
+        )
+        self.stamp_mode_combo.pack(side=tk.LEFT, padx=(6, 8))
+        self.stamp_mode_combo.bind("<<ComboboxSelected>>", self._on_stamp_mode_changed)
+        tk.Button(self.stamp_options_frame, text="章图...",
+                  font=("Microsoft YaHei", 8), command=self._choose_stamp_image,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
+        self.stamp_image_label = tk.Label(self.stamp_options_frame, text="",
+                                          font=("Microsoft YaHei", 8), fg="#666")
+        self.stamp_image_label.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(self.stamp_options_frame, text="模板...",
+                  font=("Microsoft YaHei", 8), command=self._choose_stamp_template,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
+        self.stamp_template_label = tk.Label(self.stamp_options_frame, text="",
+                                             font=("Microsoft YaHei", 8), fg="#666")
+        self.stamp_template_label.pack(side=tk.LEFT)
+        self.cv_stamp_options = self.panel_canvas.create_window(
+            15, 210, window=self.stamp_options_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_stamp_options, state='hidden')
+
+        # PDF批量盖章选项 (y=245)
+        self.stamp_options2_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.stamp_options2_frame, text="二维码内容:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.stamp_qr_entry = tk.Entry(self.stamp_options2_frame, textvariable=self.stamp_qr_text_var,
+                                       width=12, font=("Microsoft YaHei", 9))
+        self.stamp_qr_entry.pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.stamp_options2_frame, text="页码:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        tk.Entry(self.stamp_options2_frame, textvariable=self.stamp_pages_var,
+                 width=10, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.stamp_options2_frame, text="透明度:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        ttk.Combobox(
+            self.stamp_options2_frame, textvariable=self.stamp_opacity_var,
+            values=["0.3", "0.5", "0.7", "0.85", "1.0"],
+            state='readonly', width=5, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.stamp_options2_frame, text="位置:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.stamp_position_combo = ttk.Combobox(
+            self.stamp_options2_frame, textvariable=self.stamp_position_var,
+            values=["右下", "右上", "左下", "左上", "居中"],
+            state='readonly', width=5, font=("Microsoft YaHei", 9)
+        )
+        self.stamp_position_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_stamp_options2 = self.panel_canvas.create_window(
+            15, 245, window=self.stamp_options2_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_stamp_options2, state='hidden')
+
+        # 批量盖章提示 (y=270)
+        self.stamp_hint_var = tk.StringVar(value="")
+        self.stamp_hint_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.stamp_hint_frame, textvariable=self.stamp_hint_var,
+                 font=("Microsoft YaHei", 8), fg="#888888").pack(anchor=tk.W)
+        self.cv_stamp_hint = self.panel_canvas.create_window(
+            15, 270, window=self.stamp_hint_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_stamp_hint, state='hidden')
+
         # API状态提示
         self.cv_api_hint = self.panel_canvas.create_text(
             15, 270, text="", font=("Microsoft YaHei", 8), anchor="nw", fill="#888888"
@@ -750,6 +833,9 @@ class PDFConverterApp:
         self.panel_canvas.coords(self.cv_batch_options, 15, 210)
         self.panel_canvas.coords(self.cv_batch_options2, 15, 245)
         self.panel_canvas.coords(self.cv_batch_hint, 15, 270)
+        self.panel_canvas.coords(self.cv_stamp_options, 15, 210)
+        self.panel_canvas.coords(self.cv_stamp_options2, 15, 245)
+        self.panel_canvas.coords(self.cv_stamp_hint, 15, 270)
         self.panel_canvas.coords(self.cv_api_hint, 15, 270)
         self.panel_canvas.coords(self.cv_progress_bar, 20, 290)
         self.panel_canvas.itemconfigure(self.cv_progress_bar, width=w - 40)
@@ -774,8 +860,8 @@ class PDFConverterApp:
                         self.cv_compress_options, self.cv_compress_hint,
                         self.cv_extract_options, self.cv_extract_hint,
                         self.cv_excel_options, self.cv_excel_mode, self.cv_excel_hint,
-                        self.cv_batch_options, self.cv_batch_options2,
-                        self.cv_batch_hint]:
+                        self.cv_batch_options, self.cv_batch_options2, self.cv_batch_hint,
+                        self.cv_stamp_options, self.cv_stamp_options2, self.cv_stamp_hint]:
             self.panel_canvas.itemconfigure(cv_item, state='hidden')
 
         title_prefix = self.title_text_var.get().split(' - ')[0] if ' - ' in self.title_text_var.get() else self.title_text_var.get()
@@ -887,6 +973,17 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_section2, text="批量提取选项")
             self.root.title(f"{title_prefix} - PDF批量文本/图片提取")
 
+        if func == "PDF批量盖章":
+            self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
+            self.panel_canvas.itemconfigure(self.cv_stamp_options, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_stamp_options2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_stamp_hint, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件（可多选）")
+            self.panel_canvas.itemconfigure(self.cv_section2, text="批量盖章选项")
+            self._on_stamp_mode_changed()
+            self.root.title(f"{title_prefix} - PDF批量盖章")
+
         self.selected_file.set("")
         self.selected_files_list = []
         self._update_order_btn()
@@ -895,6 +992,42 @@ class PDFConverterApp:
 
     def _on_option_changed(self):
         self._update_api_hint()
+        self.save_settings()
+
+    def _choose_stamp_image(self):
+        filename = filedialog.askopenfilename(
+            title="选择章图",
+            filetypes=[("图片文件", "*.png;*.jpg;*.jpeg;*.bmp"), ("所有文件", "*.*")]
+        )
+        if filename:
+            self.stamp_image_path = filename
+            name = os.path.basename(filename)
+            self.stamp_image_label.config(text=name if len(name) <= 16 else name[:13] + "...")
+            self.save_settings()
+
+    def _choose_stamp_template(self):
+        filename = filedialog.askopenfilename(
+            title="选择模板JSON",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")]
+        )
+        if filename:
+            self.stamp_template_path = filename
+            name = os.path.basename(filename)
+            self.stamp_template_label.config(text=name if len(name) <= 16 else name[:13] + "...")
+            self.save_settings()
+
+    def _on_stamp_mode_changed(self, event=None):
+        mode = self.stamp_mode_var.get()
+        if mode == "普通章":
+            self.stamp_hint_var.set("普通章：每页盖完整章图，可设置位置、透明度、尺寸。")
+        elif mode == "二维码":
+            self.stamp_hint_var.set("二维码：根据输入内容自动生成二维码并盖章。")
+        elif mode == "骑缝章":
+            self.stamp_hint_var.set("骑缝章：章图按页切片后盖在页边。")
+        else:
+            self.stamp_hint_var.set("模板：按 JSON 模板批量盖章（seal/qr/text）。")
+        self.stamp_qr_entry.config(state=('normal' if mode == "二维码" else 'disabled'))
+        self.stamp_position_combo.config(state=('disabled' if mode == "骑缝章" else 'readonly'))
         self.save_settings()
 
     def _on_split_mode_changed(self, event=None):
@@ -1049,7 +1182,7 @@ class PDFConverterApp:
         """多文件时显示排序按钮，否则隐藏"""
         func = self.current_function_var.get()
         show = (len(self.selected_files_list) > 1
-                and func in ("图片转PDF", "PDF合并", "PDF转Word", "PDF转图片", "PDF批量文本/图片提取"))
+                and func in ("图片转PDF", "PDF合并", "PDF转Word", "PDF转图片", "PDF批量文本/图片提取", "PDF批量盖章"))
         if show:
             self.order_btn.pack(side=tk.LEFT, padx=(10, 0), ipady=6)
         else:
@@ -1100,7 +1233,7 @@ class PDFConverterApp:
     def browse_file(self):
         func = self.current_function_var.get()
 
-        if func in ("PDF转Word", "PDF转图片", "PDF合并", "PDF批量文本/图片提取"):
+        if func in ("PDF转Word", "PDF转图片", "PDF合并", "PDF批量文本/图片提取", "PDF批量盖章"):
             # 多选PDF文件
             filenames = filedialog.askopenfilenames(
                 title="选择PDF文件（可多选）",
@@ -1289,6 +1422,17 @@ class PDFConverterApp:
                 if not self.batch_text_enabled_var.get() and not self.batch_image_enabled_var.get():
                     messagebox.showwarning("提示", "请至少选择文本或图片提取！")
                     return
+            if func == "PDF批量盖章":
+                mode = self.stamp_mode_var.get()
+                if mode in ("普通章", "骑缝章") and not self.stamp_image_path:
+                    messagebox.showwarning("提示", "请先选择章图文件。")
+                    return
+                if mode == "二维码" and not self.stamp_qr_text_var.get().strip():
+                    messagebox.showwarning("提示", "请填写二维码内容。")
+                    return
+                if mode == "模板" and not self.stamp_template_path:
+                    messagebox.showwarning("提示", "请先选择模板JSON。")
+                    return
 
         for f in self.selected_files_list:
             if not os.path.exists(f):
@@ -1337,6 +1481,8 @@ class PDFConverterApp:
                 self._do_convert_excel()
             elif func == "PDF批量文本/图片提取":
                 self._do_convert_batch_extract()
+            elif func == "PDF批量盖章":
+                self._do_convert_batch_stamp()
         except Exception as e:
             logging.error(f"转换异常: {e}", exc_info=True)
             self.root.after(0, lambda: messagebox.showerror(
@@ -1522,6 +1668,75 @@ class PDFConverterApp:
             if messagebox.askyesno("批量提取完成", msg):
                 self.open_folder(output_dir)
             self.status_message.set("批量提取完成")
+
+        self.root.after(0, _show)
+
+    def _do_convert_batch_stamp(self):
+        converter = PDFBatchStampConverter(
+            on_progress=self._simple_progress_callback
+        )
+
+        self.root.after(0, lambda: self.progress_bar.config(
+            mode='determinate', maximum=100, value=0))
+        self.start_time = time.time()
+
+        mode_map = {
+            "普通章": "seal",
+            "二维码": "qr",
+            "骑缝章": "seam",
+            "模板": "template",
+        }
+        position_map = {
+            "右下": "right_bottom",
+            "右上": "right_top",
+            "左下": "left_bottom",
+            "左上": "left_top",
+            "居中": "center",
+        }
+        seam_side_map = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}
+        seam_align_map = {"居中": "center", "顶部": "top", "底部": "bottom"}
+
+        result = converter.convert(
+            files=list(self.selected_files_list),
+            mode=mode_map.get(self.stamp_mode_var.get(), "seal"),
+            pages_str=self.stamp_pages_var.get().strip(),
+            opacity=self.stamp_opacity_var.get().strip() or "0.85",
+            position=position_map.get(self.stamp_position_var.get(), "right_bottom"),
+            size_ratio=self.stamp_size_ratio_var.get().strip() or "0.18",
+            seal_image_path=self.stamp_image_path,
+            qr_text=self.stamp_qr_text_var.get().strip(),
+            seam_side=seam_side_map.get(self.stamp_seam_side_var.get(), "right"),
+            seam_align=seam_align_map.get(self.stamp_seam_align_var.get(), "center"),
+            seam_overlap_ratio=self.stamp_seam_overlap_var.get().strip() or "0.25",
+            template_path=self.stamp_template_path,
+        )
+
+        self.history.add({
+            'function': 'PDF批量盖章',
+            'input_files': list(self.selected_files_list),
+            'output': ', '.join(result.get('output_files', [])),
+            'success': result.get('success', False),
+            'message': result.get('message', ''),
+            'page_count': result.get('page_count', 0),
+        })
+
+        if not result.get('success'):
+            self.root.after(0, lambda: messagebox.showerror(
+                "批量盖章失败", result.get('message', '未知错误')))
+            self.root.after(0, lambda: self.status_message.set("批量盖章失败"))
+            return
+
+        output_files = result.get('output_files', [])
+
+        def _show():
+            msg = (f"{result.get('message', '批量盖章完成')}\n\n"
+                   f"输出文件数量：{len(output_files)}")
+            if output_files:
+                msg += f"\n\n示例输出：\n{output_files[0]}"
+            msg += "\n\n是否打开输出文件夹？"
+            if messagebox.askyesno("批量盖章完成", msg) and output_files:
+                self.open_folder(output_files[0])
+            self.status_message.set("批量盖章完成")
 
         self.root.after(0, _show)
 
@@ -2501,8 +2716,29 @@ class PDFConverterApp:
             self.batch_image_dedupe_var.set(data.get('batch_image_dedupe', False))
             self.batch_image_format_var.set(data.get('batch_image_format', '原格式'))
             self.batch_zip_enabled_var.set(data.get('batch_zip_enabled', False))
+            # 批量盖章选项
+            saved_stamp_mode = data.get('stamp_mode', '普通章')
+            if saved_stamp_mode in ("普通章", "二维码", "骑缝章", "模板"):
+                self.stamp_mode_var.set(saved_stamp_mode)
+            self.stamp_pages_var.set(data.get('stamp_pages', ''))
+            self.stamp_opacity_var.set(str(data.get('stamp_opacity', '0.85')))
+            self.stamp_position_var.set(data.get('stamp_position', '右下'))
+            self.stamp_size_ratio_var.set(str(data.get('stamp_size_ratio', '0.18')))
+            self.stamp_qr_text_var.set(data.get('stamp_qr_text', ''))
+            self.stamp_seam_side_var.set(data.get('stamp_seam_side', '右侧'))
+            self.stamp_seam_align_var.set(data.get('stamp_seam_align', '居中'))
+            self.stamp_seam_overlap_var.set(str(data.get('stamp_seam_overlap', '0.25')))
+            self.stamp_image_path = data.get('stamp_image_path', '') or ''
+            self.stamp_template_path = data.get('stamp_template_path', '') or ''
+            if self.stamp_image_path and os.path.exists(self.stamp_image_path):
+                nm = os.path.basename(self.stamp_image_path)
+                self.stamp_image_label.config(text=nm if len(nm) <= 16 else nm[:13] + "...")
+            if self.stamp_template_path and os.path.exists(self.stamp_template_path):
+                nm2 = os.path.basename(self.stamp_template_path)
+                self.stamp_template_label.config(text=nm2 if len(nm2) <= 16 else nm2[:13] + "...")
             if self.bg_image_path:
                 self.apply_background_image()
+            self._on_stamp_mode_changed()
             self._update_api_hint()
         except Exception:
             pass
@@ -2534,6 +2770,17 @@ class PDFConverterApp:
             'batch_image_dedupe': bool(self.batch_image_dedupe_var.get()),
             'batch_image_format': self.batch_image_format_var.get(),
             'batch_zip_enabled': bool(self.batch_zip_enabled_var.get()),
+            'stamp_mode': self.stamp_mode_var.get(),
+            'stamp_pages': self.stamp_pages_var.get(),
+            'stamp_opacity': self.stamp_opacity_var.get(),
+            'stamp_position': self.stamp_position_var.get(),
+            'stamp_size_ratio': self.stamp_size_ratio_var.get(),
+            'stamp_qr_text': self.stamp_qr_text_var.get(),
+            'stamp_seam_side': self.stamp_seam_side_var.get(),
+            'stamp_seam_align': self.stamp_seam_align_var.get(),
+            'stamp_seam_overlap': self.stamp_seam_overlap_var.get(),
+            'stamp_image_path': self.stamp_image_path,
+            'stamp_template_path': self.stamp_template_path,
         }
         try:
             with open(self.settings_path, 'w', encoding='utf-8') as f:

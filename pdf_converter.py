@@ -34,7 +34,6 @@ def _setup_logging():
         ]
     )
 
-
 def main():
     """主函数"""
     _setup_logging()
@@ -43,7 +42,6 @@ def main():
     root = tk.Tk()
     app = PDFConverterApp(root)
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()

@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 try:
@@ -29,6 +30,12 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
 from core.ocr_client import BaiduOCRClient, REQUESTS_AVAILABLE
 
@@ -59,6 +66,9 @@ class PDFBatchExtractConverter:
         image_dedupe=False,
         image_format="原格式",
         zip_output=False,
+        keyword_filter="",
+        regex_filter="",
+        regex_enabled=False,
     ):
         """批量提取 PDF 文本/图片。
 
@@ -104,6 +114,26 @@ class PDFBatchExtractConverter:
         if image_format != "原格式" and not PIL_AVAILABLE:
             result["message"] = "Pillow 未安装，无法进行图片格式转换"
             return result
+
+        if text_format.lower() == "xlsx" and not OPENPYXL_AVAILABLE:
+            result["message"] = "openpyxl 未安装，无法导出 xlsx"
+            return result
+
+        # 过滤器准备
+        keywords = []
+        if keyword_filter and keyword_filter.strip():
+            for part in re.split(r"[,\s]+", keyword_filter.strip()):
+                token = part.strip()
+                if token:
+                    keywords.append(token)
+
+        regex_obj = None
+        if regex_enabled and regex_filter and regex_filter.strip():
+            try:
+                regex_obj = re.compile(regex_filter)
+            except re.error as e:
+                result["message"] = f"正则表达式无效: {e}"
+                return result
 
         # 输出目录
         if not output_dir:
@@ -216,13 +246,14 @@ class PDFBatchExtractConverter:
                                     f"OCR失败: {base_name} 第{page_idx + 1}页 ({e})"
                                 )
 
-                        per_pdf_text_rows.append({
-                            "file": base_name,
-                            "page": page_idx + 1,
-                            "text": page_text,
-                            "ocr": ocr_used,
-                        })
-                        per_pdf_text.append((page_idx + 1, page_text))
+                        if self._match_text_filter(page_text, keywords, regex_obj):
+                            per_pdf_text_rows.append({
+                                "file": base_name,
+                                "page": page_idx + 1,
+                                "text": page_text,
+                                "ocr": ocr_used,
+                            })
+                            per_pdf_text.append((page_idx + 1, page_text))
 
                     # 图片提取
                     if extract_images:
@@ -293,6 +324,8 @@ class PDFBatchExtractConverter:
                                         f.write("\n")
                     elif text_format.lower() == "csv":
                         all_text_rows.extend(per_pdf_text_rows)
+                    elif text_format.lower() == "xlsx":
+                        all_text_rows.extend(per_pdf_text_rows)
                     else:
                         all_text_rows.extend(per_pdf_text_rows)
 
@@ -327,6 +360,20 @@ class PDFBatchExtractConverter:
                 json_path = os.path.join(output_dir, "文本", "全文_汇总.json")
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(all_text_rows, f, ensure_ascii=False, indent=2)
+            elif text_format.lower() == "xlsx":
+                xlsx_path = os.path.join(output_dir, "文本", "全文_汇总.xlsx")
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "text_rows"
+                ws.append(["file", "page", "text", "ocr"])
+                for row in all_text_rows:
+                    ws.append([
+                        row.get("file", ""),
+                        row.get("page", ""),
+                        row.get("text", ""),
+                        "1" if row.get("ocr") else "0",
+                    ])
+                wb.save(xlsx_path)
 
         # summary
         summary_path = os.path.join(output_dir, "summary.json")
@@ -432,3 +479,20 @@ class PDFBatchExtractConverter:
         if result.get("errors"):
             msg += f"\n\n有 {len(result['errors'])} 条警告/错误，详情见 summary.json"
         return msg
+
+    @staticmethod
+    def _match_text_filter(text, keywords, regex_obj):
+        if not keywords and regex_obj is None:
+            return True
+
+        normalized = text or ""
+
+        if keywords:
+            hit_kw = any(k in normalized for k in keywords)
+            if not hit_kw:
+                return False
+
+        if regex_obj is not None:
+            return bool(regex_obj.search(normalized))
+
+        return True
