@@ -4,6 +4,28 @@
     "input_files": [
       "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
     ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_222357.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 22:23:58"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_203112.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 20:31:12"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
     "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_201254.pdf",
     "success": true,
     "message": "成功为 9 页添加水印",

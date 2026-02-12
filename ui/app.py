@@ -2535,13 +2535,18 @@ class PDFConverterApp:
                     if err or not payload:
                         messagebox.showerror("预览失败", f"读取PDF预览失败：\n{err or '未知错误'}")
                         return
-                    page_image, page_count = payload
+                    if len(payload) >= 3:
+                        page_image, page_count, page_rect_size = payload
+                    else:
+                        page_image, page_count = payload
+                        page_rect_size = (page_image.width, page_image.height)
                     self._open_stamp_preview(preloaded={
                         "mode_key": mode_key,
                         "active_stamp_path": active_stamp_path,
                         "source_pdf": source_pdf,
                         "page_image": page_image,
                         "page_count": page_count,
+                        "page_rect_size": page_rect_size,
                     })
 
                 self.root.after(0, on_done)
@@ -3234,7 +3239,9 @@ class PDFConverterApp:
         if cached and cached.get("mtime") == mtime and cached.get("first_page_png"):
             try:
                 page_image = Image.open(io.BytesIO(cached["first_page_png"])).convert("RGB")
-                return (page_image, int(cached.get("page_count", 1))), ""
+                first_page_rect = cached.get("first_page_rect")
+                if isinstance(first_page_rect, (list, tuple)) and len(first_page_rect) == 2:
+                    return (page_image, int(cached.get("page_count", 1)), first_page_rect), ""
             except Exception:
                 pass
 
@@ -3244,6 +3251,7 @@ class PDFConverterApp:
                 return None, "该PDF没有可预览的页面。"
             first_page = doc[0]
             page_count = len(doc)
+            first_page_rect = (float(first_page.rect.width), float(first_page.rect.height))
             pix = first_page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
             png_bytes = pix.tobytes("png")
             page_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
@@ -3252,8 +3260,9 @@ class PDFConverterApp:
                     "mtime": mtime,
                     "page_count": page_count,
                     "first_page_png": png_bytes,
+                    "first_page_rect": first_page_rect,
                 }
-            return (page_image, page_count), ""
+            return (page_image, page_count, first_page_rect), ""
         finally:
             doc.close()
 
@@ -3721,11 +3730,16 @@ class PDFConverterApp:
                     if err or not payload:
                         messagebox.showerror("预览失败", f"读取PDF预览失败：\n{err or '未知错误'}")
                         return
-                    page_image, page_count = payload
+                    if len(payload) >= 3:
+                        page_image, page_count, page_rect_size = payload
+                    else:
+                        page_image, page_count = payload
+                        page_rect_size = (page_image.width, page_image.height)
                     self._open_watermark_preview(preloaded={
                         "source_pdf": source_pdf,
                         "page_image": page_image,
                         "page_count": page_count,
+                        "page_rect_size": page_rect_size,
                     })
 
                 self.root.after(0, on_done)
@@ -3736,6 +3750,13 @@ class PDFConverterApp:
         source_pdf = preloaded.get("source_pdf", "")
         page_image = preloaded.get("page_image")
         page_count = int(preloaded.get("page_count", 1))
+        page_rect_size = preloaded.get("page_rect_size", (page_image.width if page_image else 1, page_image.height if page_image else 1))
+        try:
+            page_pdf_w = max(1.0, float(page_rect_size[0]))
+            page_pdf_h = max(1.0, float(page_rect_size[1]))
+        except Exception:
+            page_pdf_w = float(page_image.width if page_image else 1)
+            page_pdf_h = float(page_image.height if page_image else 1)
         if page_image is None:
             messagebox.showerror("预览失败", "预览数据为空，请重试。")
             return
@@ -3907,11 +3928,11 @@ class PDFConverterApp:
             rnd = random.Random((row + 1) * 9176 + (col + 1) * 101 + 1000003)
             return max(0.25, 1.0 + (rnd.random() * 2.0 - 1.0) * strength)
 
-        def iter_positions(mode_key, layout_key, w, h, base_w, base_h):
+        def iter_positions(mode_key, layout_key, w, h, base_w, base_h, min_gap_x, min_gap_y, margin_x, margin_y):
             if mode_key == "tile":
                 spacing = self._clamp_value(spacing_var.get() / 100.0, 0.5, 2.0, 1.0)
-                gap_x = max(base_w * 1.5, 90.0) * spacing
-                gap_y = max(base_h * 1.7, 90.0) * spacing
+                gap_x = max(base_w * 1.5, min_gap_x) * spacing
+                gap_y = max(base_h * 1.7, min_gap_y) * spacing
                 if layout_key == "row":
                     gap_y *= 2.2
                 elif layout_key == "col":
@@ -3929,21 +3950,20 @@ class PDFConverterApp:
                     row += 1
                 return
 
-            margin = 24.0
             if mode_key == "center":
                 yield w / 2.0, h / 2.0, 0, 0
             elif mode_key == "top-center":
-                yield w / 2.0, margin + base_h / 2.0, 0, 0
+                yield w / 2.0, margin_y + base_h / 2.0, 0, 0
             elif mode_key == "bottom-center":
-                yield w / 2.0, h - margin - base_h / 2.0, 0, 0
+                yield w / 2.0, h - margin_y - base_h / 2.0, 0, 0
             elif mode_key == "top-left":
-                yield margin + base_w / 2.0, margin + base_h / 2.0, 0, 0
+                yield margin_x + base_w / 2.0, margin_y + base_h / 2.0, 0, 0
             elif mode_key == "top-right":
-                yield w - margin - base_w / 2.0, margin + base_h / 2.0, 0, 0
+                yield w - margin_x - base_w / 2.0, margin_y + base_h / 2.0, 0, 0
             elif mode_key == "bottom-left":
-                yield margin + base_w / 2.0, h - margin - base_h / 2.0, 0, 0
+                yield margin_x + base_w / 2.0, h - margin_y - base_h / 2.0, 0, 0
             elif mode_key == "bottom-right":
-                yield w - margin - base_w / 2.0, h - margin - base_h / 2.0, 0, 0
+                yield w - margin_x - base_w / 2.0, h - margin_y - base_h / 2.0, 0, 0
             else:
                 yield w / 2.0, h / 2.0, 0, 0
 
@@ -4008,6 +4028,12 @@ class PDFConverterApp:
             rotate_deg = float(rotate_var.get())
             mode_key, layout_key = self._resolve_watermark_mode(pos_var.get())
             base_size = float(size_var.get())
+            sx = float(disp.width) / max(1.0, page_pdf_w)
+            sy = float(disp.height) / max(1.0, page_pdf_h)
+            min_gap_x = 90.0 * sx
+            min_gap_y = 90.0 * sy
+            margin_x = 20.0 * sx
+            margin_y = 20.0 * sy
 
             if has_image:
                 base = get_image_base(opacity01, rotate_deg)
@@ -4017,7 +4043,10 @@ class PDFConverterApp:
                     else:
                         nominal_w = max(16, int(disp.width * 0.33 * (base_size / 40.0)))
                     nominal_h = max(10, int(nominal_w * base.height / max(1, base.width)))
-                    for cx, cy, row, col in iter_positions(mode_key, layout_key, disp.width, disp.height, nominal_w, nominal_h):
+                    for cx, cy, row, col in iter_positions(
+                        mode_key, layout_key, disp.width, disp.height, nominal_w, nominal_h,
+                        min_gap_x=min_gap_x, min_gap_y=min_gap_y, margin_x=margin_x, margin_y=margin_y
+                    ):
                         factor = tile_factor(row, col) if mode_key == "tile" else 1.0
                         tw = max(10, int(nominal_w * factor))
                         th = max(10, int(nominal_h * factor))
@@ -4028,7 +4057,10 @@ class PDFConverterApp:
                     base_font = max(10, int(base_size))
                     est_w = max(20, int(base_font * max(1, len(wm_text)) * 0.6))
                     est_h = max(16, int(base_font * 1.5))
-                    for cx, cy, row, col in iter_positions(mode_key, layout_key, disp.width, disp.height, est_w, est_h):
+                    for cx, cy, row, col in iter_positions(
+                        mode_key, layout_key, disp.width, disp.height, est_w, est_h,
+                        min_gap_x=min_gap_x, min_gap_y=min_gap_y, margin_x=margin_x, margin_y=margin_y
+                    ):
                         factor = tile_factor(row, col) if mode_key == "tile" else 1.0
                         draw_font = max(8, int(base_font * factor))
                         stamp = get_text_stamp(draw_font, opacity01, rotate_deg)
