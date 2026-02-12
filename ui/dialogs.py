@@ -20,7 +20,7 @@ def open_settings_window(app):
     """
     win = tk.Toplevel(app.root)
     win.title("设置")
-    win.geometry("480x520")
+    win.geometry("480x560")
     win.resizable(False, False)
 
     # 使用 Notebook 分页签
@@ -36,8 +36,12 @@ def open_settings_window(app):
                            font=("Microsoft YaHei", 10))
     title_entry.pack(fill=tk.X, pady=(4, 12))
 
-    tk.Button(tab_appearance, text="更换背景", font=("Microsoft YaHei", 10),
-              command=app.choose_background_image).pack(anchor=tk.W)
+    bg_btn_frame = tk.Frame(tab_appearance)
+    bg_btn_frame.pack(anchor=tk.W)
+    tk.Button(bg_btn_frame, text="更换背景", font=("Microsoft YaHei", 10),
+              command=app.choose_background_image).pack(side=tk.LEFT)
+    tk.Button(bg_btn_frame, text="清除背景", font=("Microsoft YaHei", 10),
+              command=app.clear_background_image).pack(side=tk.LEFT, padx=(8, 0))
 
     tk.Label(tab_appearance, text="面板透明度:", font=("Microsoft YaHei", 10)
              ).pack(anchor=tk.W, pady=(12, 0))
@@ -65,6 +69,24 @@ def open_settings_window(app):
     secret_key_var = tk.StringVar(value=app.baidu_secret_key)
     tk.Entry(tab_api, textvariable=secret_key_var, font=("Microsoft YaHei", 9),
              width=50, show="*").pack(fill=tk.X, pady=(2, 8))
+
+    tk.Label(tab_api, text="OCR识别模式:", font=("Microsoft YaHei", 9)).pack(anchor=tk.W)
+    ocr_quality_var = tk.StringVar(value=app.ocr_quality_mode_var.get())
+    ocr_mode_combo = ttk.Combobox(
+        tab_api,
+        textvariable=ocr_quality_var,
+        values=("快速", "平衡", "高精"),
+        state="readonly",
+        font=("Microsoft YaHei", 9),
+        width=12,
+    )
+    ocr_mode_combo.pack(anchor=tk.W, pady=(2, 8))
+    tk.Label(
+        tab_api,
+        text="快速=更快速度，平衡=默认推荐，高精=更高质量但更慢",
+        font=("Microsoft YaHei", 8),
+        fg="#666666",
+    ).pack(anchor=tk.W, pady=(0, 8))
 
     # 测试连接
     test_status_var = tk.StringVar(value="")
@@ -124,6 +146,7 @@ def open_settings_window(app):
     def save_api_settings():
         app.baidu_api_key = api_key_var.get().strip()
         app.baidu_secret_key = secret_key_var.get().strip()
+        app.ocr_quality_mode_var.set(ocr_quality_var.get().strip() or "平衡")
         app.xslt_path = xslt_var.get().strip() or None
         app._baidu_client = None  # 重建客户端
         app.save_settings()

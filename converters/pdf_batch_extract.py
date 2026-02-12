@@ -60,6 +60,7 @@ class PDFBatchExtractConverter:
         text_mode="merge",
         preserve_layout=True,
         ocr_enabled=False,
+        ocr_mode="平衡",
         api_key=None,
         secret_key=None,
         image_per_page=False,
@@ -111,18 +112,22 @@ class PDFBatchExtractConverter:
             result["message"] = "已启用 OCR，但未配置百度 OCR API Key/Secret Key"
             return result
 
+        text_format_norm = (text_format or "txt").strip().lower()
+        if text_format_norm == "excel":
+            text_format_norm = "xlsx"
+
         if image_format != "原格式" and not PIL_AVAILABLE:
             result["message"] = "Pillow 未安装，无法进行图片格式转换"
             return result
 
-        if text_format.lower() == "xlsx" and not OPENPYXL_AVAILABLE:
+        if text_format_norm == "xlsx" and not OPENPYXL_AVAILABLE:
             result["message"] = "openpyxl 未安装，无法导出 xlsx"
             return result
 
         # 过滤器准备
         keywords = []
         if keyword_filter and keyword_filter.strip():
-            for part in re.split(r"[,\s]+", keyword_filter.strip()):
+            for part in re.split(r"[,，;\s]+", keyword_filter.strip()):
                 token = part.strip()
                 if token:
                     keywords.append(token)
@@ -179,6 +184,7 @@ class PDFBatchExtractConverter:
         ocr_client = None
         if ocr_enabled:
             ocr_client = BaiduOCRClient(api_key, secret_key)
+        ocr_dpi = self._ocr_mode_to_dpi(ocr_mode)
 
         processed_pages = 0
         dedupe_hashes = set()
@@ -230,13 +236,15 @@ class PDFBatchExtractConverter:
                     page_text = ""
                     ocr_used = False
                     if extract_text:
-                        page_text = page.get_text("text") or ""
+                        raw_page_text = page.get_text("text") or ""
+                        page_text = raw_page_text
                         if not preserve_layout:
                             page_text = self._clean_text(page_text)
 
-                        if ocr_enabled and not page_text.strip():
+                        # 智能OCR触发：不仅“纯空页”触发，也会在文本极少时触发
+                        if ocr_enabled and self._needs_ocr_text_fallback(raw_page_text):
                             try:
-                                pix = page.get_pixmap(dpi=300)
+                                pix = page.get_pixmap(dpi=ocr_dpi)
                                 img_bytes = pix.tobytes("png")
                                 lines = ocr_client.recognize_text(img_bytes)
                                 page_text = "\n".join(lines) if lines else ""
@@ -306,7 +314,7 @@ class PDFBatchExtractConverter:
 
                 # 写文本输出
                 if extract_text:
-                    if text_format.lower() == "txt":
+                    if text_format_norm == "txt":
                         if text_mode == "per_page":
                             for page_no, text in per_pdf_text:
                                 txt_path = os.path.join(
@@ -322,9 +330,9 @@ class PDFBatchExtractConverter:
                                         if text:
                                             f.write(text)
                                         f.write("\n")
-                    elif text_format.lower() == "csv":
+                    elif text_format_norm == "csv":
                         all_text_rows.extend(per_pdf_text_rows)
-                    elif text_format.lower() == "xlsx":
+                    elif text_format_norm == "xlsx":
                         all_text_rows.extend(per_pdf_text_rows)
                     else:
                         all_text_rows.extend(per_pdf_text_rows)
@@ -349,18 +357,18 @@ class PDFBatchExtractConverter:
 
         # 汇总输出
         if extract_text and all_text_rows:
-            if text_format.lower() == "csv":
+            if text_format_norm == "csv":
                 csv_path = os.path.join(output_dir, "文本", "全文_汇总.csv")
                 with open(csv_path, "w", encoding="utf-8", newline="") as f:
                     writer = csv.DictWriter(f, fieldnames=["file", "page", "text", "ocr"])
                     writer.writeheader()
                     for row in all_text_rows:
                         writer.writerow(row)
-            elif text_format.lower() == "json":
+            elif text_format_norm == "json":
                 json_path = os.path.join(output_dir, "文本", "全文_汇总.json")
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(all_text_rows, f, ensure_ascii=False, indent=2)
-            elif text_format.lower() == "xlsx":
+            elif text_format_norm == "xlsx":
                 xlsx_path = os.path.join(output_dir, "文本", "全文_汇总.xlsx")
                 wb = openpyxl.Workbook()
                 ws = wb.active
@@ -496,3 +504,29 @@ class PDFBatchExtractConverter:
             return bool(regex_obj.search(normalized))
 
         return True
+
+    @staticmethod
+    def _needs_ocr_text_fallback(raw_text):
+        """文本兜底触发条件：无文本或有效字符过少。"""
+        text = (raw_text or "").strip()
+        if not text:
+            return True
+
+        # 去掉空白后统计可见字符
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) < 16:
+            return True
+
+        # 至少包含一定数量的中文/英文/数字字符，否则视为低质量文本
+        effective = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", compact)
+        return len(effective) < 12
+
+    @staticmethod
+    def _ocr_mode_to_dpi(ocr_mode):
+        mode = (ocr_mode or "平衡").strip()
+        mapping = {
+            "快速": 220,
+            "平衡": 300,
+            "高精": 360,
+        }
+        return mapping.get(mode, 300)

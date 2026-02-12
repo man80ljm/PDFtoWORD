@@ -66,7 +66,8 @@ class PDFToWordConverter:
     def convert(self, input_file, output_file,
                 start_page=0, end_page=None,
                 ocr_enabled=False, formula_api_enabled=False,
-                api_key=None, secret_key=None, xslt_path=None):
+                api_key=None, secret_key=None, xslt_path=None,
+                ocr_mode="平衡"):
         """执行转换，返回结果字典。
 
         Returns:
@@ -96,7 +97,8 @@ class PDFToWordConverter:
                 result['mode'] = 'ocr'
                 self._convert_with_ocr(
                     input_file, output_file, start_page, end_page,
-                    formula_api_enabled, api_key, secret_key, xslt_path, result)
+                    formula_api_enabled, api_key, secret_key, xslt_path, result,
+                    ocr_mode=ocr_mode)
             else:
                 result['mode'] = 'normal'
                 self._convert_with_pdf2docx(
@@ -155,7 +157,7 @@ class PDFToWordConverter:
     def _convert_with_ocr(self, input_file, output_file,
                           start_page, end_page,
                           formula_api_on, api_key, secret_key,
-                          xslt_path, result):
+                          xslt_path, result, ocr_mode="平衡"):
         fitz_doc = fitz.open(input_file)
         total_pages = len(fitz_doc)
         if total_pages <= 0:
@@ -169,6 +171,7 @@ class PDFToWordConverter:
         doc = Document()
         formula_count = 0
         ocr_errors = []
+        dpi = self._ocr_mode_to_dpi(ocr_mode)
 
         for i, page_idx in enumerate(range(start_page, actual_end)):
             page_num = page_idx + 1
@@ -184,7 +187,6 @@ class PDFToWordConverter:
                 time.sleep(0.5)
 
             pdf_page = fitz_doc[page_idx]
-            dpi = 300
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             pix = pdf_page.get_pixmap(matrix=mat)
             img_bytes = pix.tobytes("png")
@@ -240,6 +242,16 @@ class PDFToWordConverter:
         result['formula_count'] = formula_count
         result['errors'] = ocr_errors
         self._report(percent=100, progress_text="转换完成！(100%)")
+
+    @staticmethod
+    def _ocr_mode_to_dpi(ocr_mode):
+        mode = (ocr_mode or "平衡").strip()
+        mapping = {
+            "快速": 220,
+            "平衡": 300,
+            "高精": 360,
+        }
+        return mapping.get(mode, 300)
 
     # ----------------------------------------------------------
     # 公式后处理

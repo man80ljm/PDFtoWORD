@@ -65,6 +65,7 @@ class PDFToExcelConverter:
                 strategy="自动检测",
                 merge_sheets=False,
                 extract_mode="结构提取",
+                ocr_mode="平衡",
                 api_key=None, secret_key=None):
         """从PDF提取表格并导出为Excel。
 
@@ -162,7 +163,20 @@ class PDFToExcelConverter:
 
                 # 提取表格（结构 / OCR）
                 if extract_mode == "OCR提取":
-                    tables = self._extract_tables_ocr(page, api_key, secret_key)
+                    # 优先尝试结构提取；仅当页面文本弱或结构提取失败时再用 OCR
+                    tables = []
+                    try:
+                        page_text = page.extract_text() or ""
+                    except Exception:
+                        page_text = ""
+
+                    prefer_structure = self._has_enough_page_text(page_text)
+                    if prefer_structure:
+                        tables = self._extract_tables(page, strategy)
+                    if not tables:
+                        tables = self._extract_tables_ocr(
+                            page, api_key, secret_key, ocr_mode=ocr_mode
+                        )
                 else:
                     tables = self._extract_tables(page, strategy)
 
@@ -313,11 +327,12 @@ class PDFToExcelConverter:
                     count += 1
         return count
 
-    def _extract_tables_ocr(self, page, api_key, secret_key):
+    def _extract_tables_ocr(self, page, api_key, secret_key, ocr_mode="平衡"):
         """使用 OCR 表格识别，返回二维表格列表。"""
         client = BaiduOCRClient(api_key, secret_key)
+        resolution = self._ocr_mode_to_resolution(ocr_mode)
         try:
-            page_img = page.to_image(resolution=300).original
+            page_img = page.to_image(resolution=resolution).original
             buf = io.BytesIO()
             page_img.save(buf, format="PNG")
             img_bytes = buf.getvalue()
@@ -443,6 +458,27 @@ class PDFToExcelConverter:
         for r in grid:
             trimmed.append([r[c] if c < len(r) else "" for c in keep])
         return trimmed
+
+    @staticmethod
+    def _has_enough_page_text(text, min_chars=24):
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        compact = "".join(raw.split())
+        if len(compact) < min_chars:
+            return False
+        effective = sum(1 for ch in compact if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"))
+        return effective >= max(12, min_chars // 2)
+
+    @staticmethod
+    def _ocr_mode_to_resolution(ocr_mode):
+        mode = (ocr_mode or "平衡").strip()
+        mapping = {
+            "快速": 220,
+            "平衡": 300,
+            "高精": 360,
+        }
+        return mapping.get(mode, 300)
 
     @staticmethod
     def _clean_table(table_data):

@@ -1,5 +1,71 @@
 [
   {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_201254.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 20:12:54"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_201214.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 20:12:15"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_190442.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 19:04:43"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_184115.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 18:41:16"
+  },
+  {
+    "function": "PDF加水印",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_水印_20260212_184005.pdf",
+    "success": true,
+    "message": "成功为 9 页添加水印",
+    "page_count": 9,
+    "timestamp": "2026-02-12 18:40:06"
+  },
+  {
+    "function": "PDF书签-自动生成",
+    "input_files": [
+      "D:/pythonProject/PDFtoWORD/dist/唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例.pdf"
+    ],
+    "output": "D:/pythonProject/PDFtoWORD/dist\\唐夕汐+从“孤”到“不孤”的城市孤岛文旅空间生产研究——以广州市黄埔古村为例_书签自动生成_20260212_132914.pdf",
+    "success": true,
+    "message": "自动生成 10 条书签\n当前共 10 条书签",
+    "page_count": 10,
+    "timestamp": "2026-02-12 13:29:14"
+  },
+  {
     "function": "OCR可搜索PDF",
     "input_files": [
       "D:/pythonProject/PDFtoWORD/dist/中国出土壁画全集 4_山东_13292055_拆分_20260210_212147/中国出土壁画全集 4_山东_13292055_第1-30页.pdf"

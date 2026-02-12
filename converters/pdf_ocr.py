@@ -58,7 +58,8 @@ class PDFOCRConverter:
 
     def convert(self, input_file, output_path=None,
                 api_key='', secret_key='',
-                start_page=None, end_page=None, dpi=300):
+                start_page=None, end_page=None, dpi=None, ocr_mode="平衡",
+                skip_text_pages=True, min_existing_text_chars=24):
         """对扫描版PDF进行OCR并生成可搜索PDF。
 
         Args:
@@ -68,7 +69,8 @@ class PDFOCRConverter:
             secret_key: 百度OCR Secret Key
             start_page: 起始页(1-based)，None=第1页
             end_page: 结束页(1-based)，None=最后一页
-            dpi: 渲染DPI（越高识别越准，但越慢）
+            dpi: 渲染DPI（可选，未传时按 ocr_mode 自动设置）
+            ocr_mode: OCR质量模式（快速/平衡/高精）
 
         Returns:
             dict: success, message, output_file, page_count, words_count
@@ -77,6 +79,7 @@ class PDFOCRConverter:
             'success': False, 'message': '',
             'output_file': '', 'page_count': 0,
             'words_count': 0,
+            'skipped_text_pages': 0,
         }
 
         if not FITZ_AVAILABLE:
@@ -101,6 +104,14 @@ class PDFOCRConverter:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = os.path.join(
                 dir_path, f"{basename}_可搜索_{timestamp}.pdf")
+
+        profile = self._get_ocr_mode_profile(ocr_mode)
+        if isinstance(dpi, (int, float)) and dpi > 0:
+            render_dpi = int(dpi)
+        else:
+            render_dpi = profile["dpi"]
+        retry_dpi = max(render_dpi, profile["retry_dpi"])
+        retry_score = profile["retry_score"]
 
         try:
             # 获取 access_token
@@ -139,8 +150,15 @@ class PDFOCRConverter:
                     status_text=f"第 {page_num}/{total_pages} 页"
                 )
 
+                # 已有可搜索文本的页直接跳过，可显著降低耗时
+                if skip_text_pages:
+                    existing_text = page.get_text("text") or ""
+                    if self._has_enough_text(existing_text, min_existing_text_chars):
+                        result['skipped_text_pages'] += 1
+                        continue
+
                 # 渲染页面为图片
-                pix = page.get_pixmap(dpi=dpi)
+                pix = page.get_pixmap(dpi=render_dpi)
                 img_bytes = pix.tobytes("png")
 
                 # API 频率控制
@@ -149,17 +167,17 @@ class PDFOCRConverter:
 
                 # 调用 OCR 获取带位置的文字
                 try:
-                    words_with_loc = self._ocr_with_location(img_bytes, token, dpi)
+                    words_with_loc = self._ocr_with_location(img_bytes, token, render_dpi)
                 except Exception as e:
                     logging.warning(f"第{page_num}页OCR失败: {e}")
                     continue
 
                 # 低置信度时自动提高DPI重试一次
-                if self._score_loc_words(words_with_loc) < 120 and dpi < 360:
+                if self._score_loc_words(words_with_loc) < retry_score and render_dpi < retry_dpi:
                     try:
-                        pix_hi = page.get_pixmap(dpi=360)
+                        pix_hi = page.get_pixmap(dpi=retry_dpi)
                         words_hi = self._ocr_with_location(
-                            pix_hi.tobytes("png"), token, 360
+                            pix_hi.tobytes("png"), token, retry_dpi
                         )
                         if self._score_loc_words(words_hi) > self._score_loc_words(words_with_loc):
                             words_with_loc = words_hi
@@ -215,6 +233,7 @@ class PDFOCRConverter:
             result['message'] = (
                 f"OCR完成！\n"
                 f"处理了 {pages_to_process} 页，识别 {total_words} 个字符\n"
+                f"跳过已有文本页 {result['skipped_text_pages']} 页\n"
                 f"PDF已变为可搜索版本，外观不变"
             )
             self._report(percent=100, progress_text="OCR完成！")
@@ -383,3 +402,24 @@ class PDFOCRConverter:
         buf = io.BytesIO()
         img.save(buf, 'JPEG', quality=70)
         return buf.getvalue()
+
+    @staticmethod
+    def _has_enough_text(text, min_chars=24):
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        compact = "".join(raw.split())
+        if len(compact) < min_chars:
+            return False
+        effective = sum(1 for ch in compact if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"))
+        return effective >= max(12, min_chars // 2)
+
+    @staticmethod
+    def _get_ocr_mode_profile(ocr_mode):
+        mode = (ocr_mode or "平衡").strip()
+        profiles = {
+            "快速": {"dpi": 220, "retry_dpi": 300, "retry_score": 100},
+            "平衡": {"dpi": 300, "retry_dpi": 360, "retry_score": 120},
+            "高精": {"dpi": 360, "retry_dpi": 420, "retry_score": 140},
+        }
+        return profiles.get(mode, profiles["平衡"])

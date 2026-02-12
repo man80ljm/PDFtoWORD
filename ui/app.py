@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import random
 import shutil
 import sys
 import threading
@@ -34,10 +35,12 @@ from converters.pdf_ocr import PDFOCRConverter
 from converters.pdf_to_excel import PDFToExcelConverter, TABLE_STRATEGIES
 from converters.pdf_batch_extract import PDFBatchExtractConverter
 from converters.pdf_stamp_batch import PDFBatchStampConverter
+from converters.pdf_sign_batch import PDFBatchSignConverter
 from converters.pdf_reorder import PDFReorderConverter
+from converters.pdf_bookmark import PDFBookmarkConverter
 
 try:
-    from PIL import Image, ImageTk, ImageDraw
+    from PIL import Image, ImageTk, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -61,8 +64,43 @@ ALL_FUNCTIONS = [
     "PDF转Word", "PDF转图片", "PDF合并", "PDF拆分", "图片转PDF",
     "PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页",
     "OCR可搜索PDF", "PDF转Excel", "PDF批量文本/图片提取", "PDF批量盖章",
-    "PDF页面重排/旋转/倒序",
+    "PDF页面重排/旋转/倒序", "PDF添加/移除书签",
 ]
+
+BATCH_REGEX_TEMPLATES = [
+    ("不使用模板", ""),
+    ("包含数字", r"\d+"),
+    ("4位年份(如2024)", r"(19|20)\d{2}"),
+    ("日期(YYYY-MM-DD)", r"(19|20)\d{2}-\d{1,2}-\d{1,2}"),
+    ("手机号(11位)", r"1[3-9]\d{9}"),
+    ("身份证号(18位)", r"\d{17}[\dXx]"),
+    ("邮箱", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    ("URL链接", r"https?://\S+"),
+    ("中文(连续2字以上)", r"[\u4e00-\u9fa5]{2,}"),
+    ("金额(含小数)", r"\d+(?:\.\d{1,2})?"),
+]
+
+BATCH_REGEX_TEMPLATE_MAP = dict(BATCH_REGEX_TEMPLATES)
+OCR_QUALITY_MODES = ("快速", "平衡", "高精")
+WATERMARK_POSITION_OPTIONS = [
+    "平铺", "平铺(网格)", "平铺(斜向)", "平铺(横向)", "平铺(纵向)",
+    "居中", "顶部居中", "底部居中",
+    "左上角", "右上角", "左下角", "右下角",
+]
+WATERMARK_POSITION_TO_MODE = {
+    "平铺": ("tile", "grid"),
+    "平铺(网格)": ("tile", "grid"),
+    "平铺(斜向)": ("tile", "diag"),
+    "平铺(横向)": ("tile", "row"),
+    "平铺(纵向)": ("tile", "col"),
+    "居中": ("center", "grid"),
+    "顶部居中": ("top-center", "grid"),
+    "底部居中": ("bottom-center", "grid"),
+    "左上角": ("top-left", "grid"),
+    "右上角": ("top-right", "grid"),
+    "左下角": ("bottom-left", "grid"),
+    "右下角": ("bottom-right", "grid"),
+}
 
 
 class PDFConverterApp:
@@ -116,6 +154,7 @@ class PDFConverterApp:
         self.page_end_var = tk.StringVar()
         self.title_text_var = tk.StringVar(value="PDF转换工具")
         self.settings_path = os.path.join(get_app_dir(), "settings.json")
+        self._save_settings_job = None
 
         # --- 背景/面板 ---
         self.bg_image_path = None
@@ -145,6 +184,7 @@ class PDFConverterApp:
         # --- OCR & 公式识别选项 ---
         self.ocr_enabled_var = tk.BooleanVar(value=False)
         self.formula_api_enabled_var = tk.BooleanVar(value=False)
+        self.ocr_quality_mode_var = tk.StringVar(value="平衡")
 
         # --- PDF拆分选项 ---
         self.split_mode_var = tk.StringVar(value="每页一个PDF")
@@ -158,7 +198,12 @@ class PDFConverterApp:
         self.watermark_opacity_var = tk.StringVar(value="0.3")
         self.watermark_rotation_var = tk.StringVar(value="45")
         self.watermark_fontsize_var = tk.StringVar(value="40")
+        self.watermark_size_scale_var = tk.StringVar(value="1.0")
+        self.watermark_spacing_var = tk.StringVar(value="1.0")
         self.watermark_position_var = tk.StringVar(value="平铺")
+        self.watermark_random_size_var = tk.BooleanVar(value=False)
+        self.watermark_random_strength_var = tk.StringVar(value="0.35")
+        self.watermark_pages_var = tk.StringVar()
         self.watermark_image_path = None
 
         # --- PDF加密/解密选项 ---
@@ -182,6 +227,10 @@ class PDFConverterApp:
         self.batch_image_dedupe_var = tk.BooleanVar(value=False)
         self.batch_image_format_var = tk.StringVar(value="原格式")
         self.batch_zip_enabled_var = tk.BooleanVar(value=False)
+        self.batch_keyword_var = tk.StringVar()
+        self.batch_regex_enabled_var = tk.BooleanVar(value=False)
+        self.batch_regex_var = tk.StringVar()
+        self.batch_regex_template_var = tk.StringVar(value="不使用模板")
 
         # --- 页面重排/旋转/倒序选项 ---
         self.reorder_mode_var = tk.StringVar(value="页面重排")
@@ -189,6 +238,20 @@ class PDFConverterApp:
         self.rotate_pages_var = tk.StringVar()
         self.rotate_angle_var = tk.StringVar(value="90")
         self.reorder_hint_var = tk.StringVar(value="")
+
+        # --- PDF书签选项 ---
+        self.bookmark_mode_var = tk.StringVar(value="添加书签")
+        self.bookmark_level_var = tk.StringVar(value="1")
+        self.bookmark_title_var = tk.StringVar()
+        self.bookmark_page_var = tk.StringVar(value="1")
+        self.bookmark_remove_levels_var = tk.StringVar()
+        self.bookmark_remove_keyword_var = tk.StringVar()
+        self.bookmark_json_path_var = tk.StringVar()
+        self.bookmark_auto_pattern_var = tk.StringVar(
+            value=r"^(第[一二三四五六七八九十百千万0-9]+[编卷篇章节]|\d+(?:\.\d+){0,3}\s+.+)"
+        )
+        self.bookmark_merge_existing_var = tk.BooleanVar(value=False)
+        self.bookmark_hint_var = tk.StringVar(value="")
 
         # --- 批量盖章选项 ---
         self.stamp_mode_var = tk.StringVar(value="普通章")
@@ -213,7 +276,12 @@ class PDFConverterApp:
             "size_ratio": 0.18,
             "opacity": 0.85,
         }
+        self.signature_page_profiles = {}
         self._stamp_preview_state = {}
+        self._preview_cache_lock = threading.Lock()
+        self._pdf_preview_cache = {}
+        self._stamp_base_image_cache = {}
+        self._template_preview_cache = {}
 
         # --- API 配置 ---
         self.api_provider = "baidu"
@@ -229,6 +297,7 @@ class PDFConverterApp:
         self.create_ui()
         self.load_settings()
         self.check_dependencies()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_root_close)
 
         # --- 拖拽支持 ---
         if WINDND_AVAILABLE:
@@ -442,6 +511,12 @@ class PDFConverterApp:
         tk.Button(self.watermark_options_frame, text="选图片",
                   font=("Microsoft YaHei", 8), command=self._choose_watermark_image,
                   cursor='hand2').pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(self.watermark_options_frame, text="页码:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Entry(self.watermark_options_frame, textvariable=self.watermark_pages_var,
+                 width=12, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(self.watermark_options_frame, text="（示例: 1,2,3,4-8）",
+                 font=("Microsoft YaHei", 8), fg="#888").pack(side=tk.LEFT, padx=(6, 0))
         self.watermark_img_label = tk.Label(self.watermark_options_frame, text="",
                  font=("Microsoft YaHei", 8), fg="#666")
         self.watermark_img_label.pack(side=tk.LEFT, padx=(4, 0))
@@ -463,11 +538,16 @@ class PDFConverterApp:
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Combobox(
             self.watermark_detail_frame, textvariable=self.watermark_position_var,
-            values=["平铺", "居中", "左上角", "右上角", "左下角", "右下角"],
-            width=6, font=("Microsoft YaHei", 9), state='readonly'
+            values=WATERMARK_POSITION_OPTIONS,
+            width=9, font=("Microsoft YaHei", 9), state='readonly'
         ).pack(side=tk.LEFT, padx=(4, 0))
-        tk.Label(self.watermark_detail_frame, text="（文字和图片二选一，都填则用图片）",
-                 font=("Microsoft YaHei", 8), fg="#888").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Button(
+            self.watermark_detail_frame, text="预览设置...",
+            font=("Microsoft YaHei", 8), command=self._open_watermark_preview,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(self.watermark_detail_frame, text="（图优先）",
+                 font=("Microsoft YaHei", 8), fg="#888").pack(side=tk.LEFT, padx=(6, 0))
         self.cv_watermark_detail = self.panel_canvas.create_window(
             15, 245, window=self.watermark_detail_frame, anchor="nw"
         )
@@ -642,6 +722,116 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_reorder_hint, state='hidden')
 
+        # PDF书签选项区（分多行，适配固定窗口）
+        self.bookmark_options_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_options_frame, text="模式:",
+                 font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
+        self.bookmark_mode_combo = ttk.Combobox(
+            self.bookmark_options_frame, textvariable=self.bookmark_mode_var,
+            values=["添加书签", "移除书签", "导入JSON", "导出JSON", "清空书签", "自动生成"],
+            state='readonly', width=10, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_mode_combo.pack(side=tk.LEFT, padx=(6, 10))
+        self.bookmark_mode_combo.bind("<<ComboboxSelected>>", self._on_bookmark_mode_changed)
+        tk.Label(self.bookmark_options_frame, text="级别:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_level_combo = ttk.Combobox(
+            self.bookmark_options_frame, textvariable=self.bookmark_level_var,
+            values=["1", "2", "3", "4", "5"], state='readonly',
+            width=3, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_level_combo.pack(side=tk.LEFT, padx=(4, 10))
+        tk.Label(self.bookmark_options_frame, text="页码:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_page_entry = tk.Entry(
+            self.bookmark_options_frame, textvariable=self.bookmark_page_var,
+            width=6, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_page_entry.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_bookmark_options = self.panel_canvas.create_window(
+            15, 210, window=self.bookmark_options_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_options, state='hidden')
+
+        self.bookmark_options2_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_options2_frame, text="标题:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_title_entry = tk.Entry(
+            self.bookmark_options2_frame, textvariable=self.bookmark_title_var,
+            width=44, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_title_entry.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_bookmark_options2 = self.panel_canvas.create_window(
+            15, 245, window=self.bookmark_options2_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_options2, state='hidden')
+
+        self.bookmark_options3_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_options3_frame, text="移除级别:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_remove_levels_entry = tk.Entry(
+            self.bookmark_options3_frame, textvariable=self.bookmark_remove_levels_var,
+            width=10, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_remove_levels_entry.pack(side=tk.LEFT, padx=(4, 8))
+        tk.Label(self.bookmark_options3_frame, text="关键词:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_remove_keyword_entry = tk.Entry(
+            self.bookmark_options3_frame, textvariable=self.bookmark_remove_keyword_var,
+            width=16, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_remove_keyword_entry.pack(side=tk.LEFT, padx=(4, 8))
+        self.bookmark_merge_cb = tk.Checkbutton(
+            self.bookmark_options3_frame, text="导入/自动时合并现有",
+            variable=self.bookmark_merge_existing_var,
+            font=("Microsoft YaHei", 8)
+        )
+        self.bookmark_merge_cb.pack(side=tk.LEFT, padx=(2, 0))
+        self.cv_bookmark_options3 = self.panel_canvas.create_window(
+            15, 280, window=self.bookmark_options3_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_options3, state='hidden')
+
+        self.bookmark_options4_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_options4_frame, text="JSON:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_json_entry = tk.Entry(
+            self.bookmark_options4_frame, textvariable=self.bookmark_json_path_var,
+            width=34, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_json_entry.pack(side=tk.LEFT, padx=(4, 8))
+        self.bookmark_json_btn = tk.Button(
+            self.bookmark_options4_frame, text="选择...",
+            command=self._choose_bookmark_json_path,
+            font=("Microsoft YaHei", 8), cursor='hand2'
+        )
+        self.bookmark_json_btn.pack(side=tk.LEFT, padx=(0, 0))
+        self.cv_bookmark_options4 = self.panel_canvas.create_window(
+            15, 315, window=self.bookmark_options4_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_options4, state='hidden')
+
+        self.bookmark_options5_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_options5_frame, text="自动规则:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.bookmark_auto_pattern_entry = tk.Entry(
+            self.bookmark_options5_frame, textvariable=self.bookmark_auto_pattern_var,
+            width=37, font=("Microsoft YaHei", 9)
+        )
+        self.bookmark_auto_pattern_entry.pack(side=tk.LEFT, padx=(4, 0))
+        self.cv_bookmark_options5 = self.panel_canvas.create_window(
+            15, 350, window=self.bookmark_options5_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_options5, state='hidden')
+
+        self.bookmark_hint_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.bookmark_hint_frame, textvariable=self.bookmark_hint_var,
+                 font=("Microsoft YaHei", 8), fg="#888888").pack(anchor=tk.W)
+        self.cv_bookmark_hint = self.panel_canvas.create_window(
+            15, 375, window=self.bookmark_hint_frame, anchor="nw"
+        )
+        self.panel_canvas.itemconfigure(self.cv_bookmark_hint, state='hidden')
+
         # PDF转Excel选项区 (y=210)
         self.excel_strategy_var = tk.StringVar(value='自动检测')
         self.excel_merge_var = tk.BooleanVar(value=False)
@@ -694,7 +884,7 @@ class PDFConverterApp:
         )
         self.panel_canvas.itemconfigure(self.cv_excel_hint, state='hidden')
 
-        # PDF批量文本/图片提取选项（分3行，避免固定窗口遮挡）
+        # PDF批量文本/图片提取选项（分4行，避免固定窗口遮挡）
         self.batch_options_frame = tk.Frame(self.panel_canvas)
         tk.Checkbutton(self.batch_options_frame, text="文本",
                        variable=self.batch_text_enabled_var,
@@ -706,7 +896,7 @@ class PDFConverterApp:
                  font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         ttk.Combobox(
             self.batch_options_frame, textvariable=self.batch_text_format_var,
-            values=["txt", "json", "csv"],
+            values=["txt", "json", "csv", "xlsx"],
             state='readonly', width=5, font=("Microsoft YaHei", 9)
         ).pack(side=tk.LEFT, padx=(4, 10))
         tk.Label(self.batch_options_frame, text="模式:",
@@ -753,8 +943,36 @@ class PDFConverterApp:
         self.cv_batch_options3 = self.panel_canvas.create_window(15, 280, window=self.batch_options3_frame, anchor="nw")
         self.panel_canvas.itemconfigure(self.cv_batch_options3, state='hidden')
 
+        self.batch_options4_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.batch_options4_frame, text="关键词:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        tk.Entry(self.batch_options4_frame, textvariable=self.batch_keyword_var,
+                 width=12, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(4, 12))
+        tk.Checkbutton(self.batch_options4_frame, text="正则过滤",
+                       variable=self.batch_regex_enabled_var,
+                       font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(self.batch_options4_frame, text="模板:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        self.batch_regex_template_combo = ttk.Combobox(
+            self.batch_options4_frame, textvariable=self.batch_regex_template_var,
+            values=[name for name, _ in BATCH_REGEX_TEMPLATES],
+            state='readonly', width=15, font=("Microsoft YaHei", 9)
+        )
+        self.batch_regex_template_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.batch_regex_template_combo.bind("<<ComboboxSelected>>", self._on_batch_regex_template_changed)
+        self.cv_batch_options4 = self.panel_canvas.create_window(15, 315, window=self.batch_options4_frame, anchor="nw")
+        self.panel_canvas.itemconfigure(self.cv_batch_options4, state='hidden')
+
+        self.batch_options5_frame = tk.Frame(self.panel_canvas)
+        tk.Label(self.batch_options5_frame, text="表达式:",
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        tk.Entry(self.batch_options5_frame, textvariable=self.batch_regex_var,
+                 width=44, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(6, 0))
+        self.cv_batch_options5 = self.panel_canvas.create_window(15, 350, window=self.batch_options5_frame, anchor="nw")
+        self.panel_canvas.itemconfigure(self.cv_batch_options5, state='hidden')
+
         self.cv_batch_hint = self.panel_canvas.create_text(
-            15, 305, text="页码格式示例：1,3,5-10 或 1，3，5-10（留空表示全部页）",
+            15, 375, text="页码示例: 1,3,5-10；关键词可用逗号分隔；可从“模板”选择后自动填充表达式",
             font=("Microsoft YaHei", 8), anchor="nw", fill="#888888"
         )
         self.panel_canvas.itemconfigure(self.cv_batch_hint, state='hidden')
@@ -765,13 +983,16 @@ class PDFConverterApp:
                  font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT)
         self.stamp_mode_combo = ttk.Combobox(
             self.stamp_options_frame, textvariable=self.stamp_mode_var,
-            values=["普通章", "二维码", "骑缝章", "模板"],
+            values=["普通章", "二维码", "骑缝章", "模板", "签名"],
             state='readonly', width=7, font=("Microsoft YaHei", 9)
         )
         self.stamp_mode_combo.pack(side=tk.LEFT, padx=(6, 8))
         self.stamp_mode_combo.bind("<<ComboboxSelected>>", self._on_stamp_mode_changed)
         tk.Button(self.stamp_options_frame, text="章图(多选)...",
                   font=("Microsoft YaHei", 8), command=self._choose_stamp_image,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(self.stamp_options_frame, text="清除章图",
+                  font=("Microsoft YaHei", 8), command=self._clear_stamp_images,
                   cursor='hand2').pack(side=tk.LEFT, padx=(0, 6))
         self.stamp_image_label = tk.Label(self.stamp_options_frame, text="",
                                           font=("Microsoft YaHei", 8), fg="#666")
@@ -898,6 +1119,7 @@ class PDFConverterApp:
         )
         self.status_message.trace_add("write", self._on_status_var_changed)
         self._update_stamp_preview_info()
+        self._on_bookmark_mode_changed(save=False)
 
         # 事件绑定
         self.root.bind("<Configure>", self.on_root_resize)
@@ -949,13 +1171,21 @@ class PDFConverterApp:
         self.panel_canvas.coords(self.cv_extract_hint, 15, 245)
         self.panel_canvas.coords(self.cv_reorder_options, 15, 210)
         self.panel_canvas.coords(self.cv_reorder_hint, 15, 278)
+        self.panel_canvas.coords(self.cv_bookmark_options, 15, 210)
+        self.panel_canvas.coords(self.cv_bookmark_options2, 15, 245)
+        self.panel_canvas.coords(self.cv_bookmark_options3, 15, 280)
+        self.panel_canvas.coords(self.cv_bookmark_options4, 15, 315)
+        self.panel_canvas.coords(self.cv_bookmark_options5, 15, 350)
+        self.panel_canvas.coords(self.cv_bookmark_hint, 15, 375)
         self.panel_canvas.coords(self.cv_excel_options, 15, 210)
         self.panel_canvas.coords(self.cv_excel_mode, 15, 245)
         self.panel_canvas.coords(self.cv_excel_hint, 15, 270)
         self.panel_canvas.coords(self.cv_batch_options, 15, 210)
         self.panel_canvas.coords(self.cv_batch_options2, 15, 245)
         self.panel_canvas.coords(self.cv_batch_options3, 15, 280)
-        self.panel_canvas.coords(self.cv_batch_hint, 15, 305)
+        self.panel_canvas.coords(self.cv_batch_options4, 15, 315)
+        self.panel_canvas.coords(self.cv_batch_options5, 15, 350)
+        self.panel_canvas.coords(self.cv_batch_hint, 15, 375)
         self.panel_canvas.coords(self.cv_stamp_options, 15, 210)
         self.panel_canvas.coords(self.cv_stamp_options2, 15, 245)
         self.panel_canvas.coords(self.cv_stamp_options3, 15, 280)
@@ -989,8 +1219,10 @@ class PDFConverterApp:
                         self.cv_compress_options, self.cv_compress_hint,
                         self.cv_extract_options, self.cv_extract_hint,
                         self.cv_reorder_options, self.cv_reorder_hint,
+                        self.cv_bookmark_options, self.cv_bookmark_options2, self.cv_bookmark_options3,
+                        self.cv_bookmark_options4, self.cv_bookmark_options5, self.cv_bookmark_hint,
                         self.cv_excel_options, self.cv_excel_mode, self.cv_excel_hint,
-                        self.cv_batch_options, self.cv_batch_options2, self.cv_batch_options3, self.cv_batch_hint,
+                        self.cv_batch_options, self.cv_batch_options2, self.cv_batch_options3, self.cv_batch_options4, self.cv_batch_options5, self.cv_batch_hint,
                         self.cv_stamp_options, self.cv_stamp_options2, self.cv_stamp_options3, self.cv_stamp_options4, self.cv_stamp_hint]:
             self.panel_canvas.itemconfigure(cv_item, state='hidden')
 
@@ -1097,6 +1329,24 @@ class PDFConverterApp:
             self._on_reorder_mode_changed()
             self.root.title(f"{title_prefix} - PDF页面重排/旋转/倒序")
 
+        elif func == "PDF添加/移除书签":
+            self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_range_frame, state='hidden')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_options, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_options2, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_options3, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_options4, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_options5, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_bookmark_hint, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件")
+            self.panel_canvas.itemconfigure(self.cv_section2, text="书签处理选项")
+            self.progress_y = 400
+            self.progress_text_y = 435
+            self.btn_y = 470
+            self.dnd_y = 510
+            self._on_bookmark_mode_changed()
+            self.root.title(f"{title_prefix} - PDF添加/移除书签")
+
         elif func == "PDF转Excel":
             self.panel_canvas.itemconfigure(self.cv_section2, state='normal')
             self.panel_canvas.itemconfigure(self.cv_range_frame, state='normal')
@@ -1113,13 +1363,15 @@ class PDFConverterApp:
             self.panel_canvas.itemconfigure(self.cv_batch_options, state='normal')
             self.panel_canvas.itemconfigure(self.cv_batch_options2, state='normal')
             self.panel_canvas.itemconfigure(self.cv_batch_options3, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_batch_options4, state='normal')
+            self.panel_canvas.itemconfigure(self.cv_batch_options5, state='normal')
             self.panel_canvas.itemconfigure(self.cv_batch_hint, state='normal')
             self.panel_canvas.itemconfigure(self.cv_section1, text="选择PDF文件（可多选）")
             self.panel_canvas.itemconfigure(self.cv_section2, text="批量提取选项")
-            self.progress_y = 335
-            self.progress_text_y = 370
-            self.btn_y = 415
-            self.dnd_y = 455
+            self.progress_y = 395
+            self.progress_text_y = 430
+            self.btn_y = 465
+            self.dnd_y = 505
             self.root.title(f"{title_prefix} - PDF批量文本/图片提取")
 
         if func == "PDF批量盖章":
@@ -1195,6 +1447,19 @@ class PDFConverterApp:
             self.stamp_profiles[full] = self._normalize_stamp_profile(old_profiles.get(full))
 
         self.stamp_image_paths = cleaned
+        if isinstance(self.signature_page_profiles, dict):
+            new_sig = {}
+            for page_key, page_data in self.signature_page_profiles.items():
+                if not isinstance(page_data, dict):
+                    continue
+                kept = {}
+                for p, prof in page_data.items():
+                    full = os.path.abspath(str(p))
+                    if full in self.stamp_image_paths and isinstance(prof, dict):
+                        kept[full] = prof
+                if kept:
+                    new_sig[str(page_key)] = kept
+            self.signature_page_profiles = new_sig
         if not cleaned:
             self.stamp_selected_image_idx = 0
             self.stamp_image_path = ""
@@ -1213,6 +1478,7 @@ class PDFConverterApp:
         self.stamp_selected_image_idx = idx
         self.stamp_image_path = cleaned[idx]
         self._update_stamp_image_label()
+        self._preheat_stamp_images_async(self.stamp_image_paths)
 
     def _get_stamp_profile_for_path(self, image_path):
         if not image_path:
@@ -1286,6 +1552,17 @@ class PDFConverterApp:
             self._set_stamp_images(list(filenames), selected_idx=0)
             self._update_stamp_preview_info()
             self.save_settings()
+
+    def _clear_stamp_images(self):
+        if not self.stamp_image_paths and not self.stamp_image_path:
+            self.status_message.set("没有可清除的章图")
+            return
+        self._set_stamp_images([], selected_idx=0)
+        self.stamp_profiles = {}
+        self.signature_page_profiles = {}
+        self._update_stamp_preview_info()
+        self.save_settings()
+        self.status_message.set("已清除章图")
 
     def _choose_stamp_template(self):
         filename = filedialog.askopenfilename(
@@ -1493,6 +1770,7 @@ class PDFConverterApp:
             "二维码": "qr",
             "骑缝章": "seam",
             "模板": "template",
+            "签名": "signature",
         }
         return mode_map.get(self.stamp_mode_var.get(), "seal")
 
@@ -1512,12 +1790,521 @@ class PDFConverterApp:
             self.stamp_preview_info_var.set(
                 f"骑缝预览 透明度 {opacity:.2f} 尺寸 {size_ratio:.2f}{image_suffix}{enabled_suffix}"
             )
+        elif mode_key == "signature":
+            page_count = 0
+            sign_count = 0
+            for _, data in (self.signature_page_profiles or {}).items():
+                if not isinstance(data, dict):
+                    continue
+                local = 0
+                for _, prof in data.items():
+                    if isinstance(prof, dict) and bool(prof.get("enabled", False)):
+                        local += 1
+                if local > 0:
+                    page_count += 1
+                    sign_count += local
+            self.stamp_preview_info_var.set(
+                f"签名预览 已配置{page_count}页/{sign_count}签名{image_suffix}"
+            )
         elif mode_key == "template":
             self.stamp_preview_info_var.set(f"模板预览 透明度 {opacity:.2f}")
         else:
             self.stamp_preview_info_var.set(
                 f"位置({x_ratio:.2f},{y_ratio:.2f}) 透明度 {opacity:.2f} 尺寸 {size_ratio:.2f}{image_suffix}{enabled_suffix}"
             )
+
+    def _collect_signature_items(self):
+        items = []
+        data = self.signature_page_profiles if isinstance(self.signature_page_profiles, dict) else {}
+        for page_key, page_data in data.items():
+            try:
+                page_no = int(page_key)
+            except Exception:
+                continue
+            if page_no < 1 or not isinstance(page_data, dict):
+                continue
+            for path, profile in page_data.items():
+                full = os.path.abspath(str(path))
+                if full not in (self.stamp_image_paths or []) or not os.path.exists(full):
+                    continue
+                prof = self._normalize_stamp_profile(profile)
+                if not bool(profile.get("enabled", False)):
+                    continue
+                items.append({
+                    "page": page_no,
+                    "image_path": full,
+                    "x_ratio": prof["x_ratio"],
+                    "y_ratio": prof["y_ratio"],
+                    "size_ratio": prof["size_ratio"],
+                    "opacity": prof["opacity"],
+                })
+        return items
+
+    def _open_signature_preview(self):
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("提示", "预览需要 Pillow 依赖。")
+            return
+        if not FITZ_UI_AVAILABLE:
+            messagebox.showwarning("提示", "预览需要 PyMuPDF 依赖。")
+            return
+        preview_paths = [p for p in (self.stamp_image_paths or []) if p and os.path.exists(p)]
+        if not preview_paths:
+            messagebox.showwarning("提示", "请先选择签名图片。")
+            return
+        source_pdf = self._resolve_preview_pdf()
+        if not source_pdf:
+            messagebox.showwarning("提示", "请先选择至少一个 PDF 文件，再打开预览。")
+            return
+
+        try:
+            doc = fitz.open(source_pdf)
+        except Exception as exc:
+            messagebox.showerror("预览失败", f"无法打开PDF：\n{exc}")
+            return
+        page_count = len(doc)
+        if page_count <= 0:
+            doc.close()
+            messagebox.showwarning("提示", "该 PDF 没有页面。")
+            return
+
+        page_profiles = {}
+        saved = self.signature_page_profiles if isinstance(self.signature_page_profiles, dict) else {}
+        for k, v in saved.items():
+            try:
+                page_no = int(k)
+            except Exception:
+                continue
+            if page_no < 1 or page_no > page_count or not isinstance(v, dict):
+                continue
+            page_profiles[str(page_no)] = {}
+            for path, prof in v.items():
+                full = os.path.abspath(str(path))
+                if full in preview_paths and isinstance(prof, dict):
+                    normalized = self._normalize_stamp_profile(prof)
+                    normalized["enabled"] = bool(prof.get("enabled", False))
+                    page_profiles[str(page_no)][full] = normalized
+
+        def ensure_page_state(page_no):
+            key = str(page_no)
+            if key not in page_profiles:
+                page_profiles[key] = {}
+            page_dict = page_profiles[key]
+            for path in preview_paths:
+                if path not in page_dict:
+                    base = self._normalize_stamp_profile(self._get_stamp_profile_for_path(path))
+                    base["enabled"] = False
+                    page_dict[path] = base
+            stale = [p for p in page_dict.keys() if p not in preview_paths]
+            for p in stale:
+                page_dict.pop(p, None)
+            return page_dict
+
+        preview_win = tk.Toplevel(self.root)
+        preview_win.title("签名预览")
+        screen_w = max(1000, preview_win.winfo_screenwidth())
+        screen_h = max(760, preview_win.winfo_screenheight())
+        win_w = min(1100, screen_w - 80)
+        win_h = min(820, screen_h - 120)
+        win_w = max(880, win_w)
+        win_h = max(620, win_h)
+        pos_x = max(0, int((screen_w - win_w) / 2))
+        pos_y = max(0, int((screen_h - win_h) / 2))
+        preview_win.geometry(f"{int(win_w)}x{int(win_h)}+{pos_x}+{pos_y}")
+        preview_win.minsize(820, 600)
+        preview_win.resizable(True, True)
+        preview_win.transient(self.root)
+        preview_win.grab_set()
+
+        top_frame = tk.Frame(preview_win)
+        top_frame.pack(fill=tk.X, padx=12, pady=(10, 4))
+        page_info_var = tk.StringVar(value="")
+        tk.Label(top_frame, textvariable=page_info_var, font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.LEFT)
+
+        nav_frame = tk.Frame(preview_win)
+        nav_frame.pack(fill=tk.X, padx=12, pady=(0, 2))
+
+        current_page = {"value": 1}
+        active_path_var = tk.StringVar(value=preview_paths[0])
+        enabled_vars = {p: tk.BooleanVar(value=False) for p in preview_paths}
+
+        tk.Button(nav_frame, text="上一页", font=("Microsoft YaHei", 9), width=8).pack(side=tk.LEFT)
+        prev_btn = nav_frame.winfo_children()[-1]
+        tk.Button(nav_frame, text="下一页", font=("Microsoft YaHei", 9), width=8).pack(side=tk.LEFT, padx=(6, 10))
+        next_btn = nav_frame.winfo_children()[-1]
+
+        hint_row = tk.Frame(preview_win)
+        hint_row.pack(fill=tk.X, padx=12, pady=(0, 2))
+        tk.Label(hint_row, text="勾选=参与当前页，单击签名=当前编辑", font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.LEFT)
+        zoom_info_var = tk.StringVar(value="页面缩放 100%（滚轮）")
+        tk.Label(hint_row, textvariable=zoom_info_var, font=("Microsoft YaHei", 9), fg="#666").pack(side=tk.RIGHT)
+
+        slider_frame = tk.Frame(preview_win)
+        slider_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        tk.Label(slider_frame, text="透明度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        opacity_var = tk.DoubleVar(value=85)
+        opacity_scale = tk.Scale(slider_frame, from_=5, to=100, orient=tk.HORIZONTAL, resolution=1,
+                                 showvalue=True, variable=opacity_var, length=180)
+        opacity_scale.pack(side=tk.LEFT, padx=(4, 16))
+        tk.Label(slider_frame, text="缩放:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        size_var = tk.DoubleVar(value=18)
+        size_scale = tk.Scale(slider_frame, from_=3, to=70, orient=tk.HORIZONTAL, resolution=1,
+                              showvalue=True, variable=size_var, length=160)
+        size_scale.pack(side=tk.LEFT, padx=(4, 0))
+
+        list_frame = tk.LabelFrame(preview_win, text="签名列表", font=("Microsoft YaHei", 9))
+        list_frame.pack(fill=tk.X, padx=12, pady=(0, 6))
+        for p in preview_paths:
+            row = tk.Frame(list_frame)
+            row.pack(fill=tk.X, pady=1)
+            tk.Checkbutton(row, variable=enabled_vars[p], font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+            tk.Radiobutton(row, variable=active_path_var, value=p, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(2, 4))
+            tk.Label(row, text=os.path.basename(p), font=("Microsoft YaHei", 9), anchor="w").pack(side=tk.LEFT)
+
+        canvas_frame = tk.Frame(preview_win, bg="#f5f5f5")
+        canvas_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=8)
+        canvas = tk.Canvas(canvas_frame, width=900, height=420, bg="#f5f5f5",
+                           highlightthickness=1, highlightbackground="#cccccc")
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        state = {
+            "suspend": False,
+            "drag_path": None,
+            "drag_offset_x": 0.0,
+            "drag_offset_y": 0.0,
+            "pan_active": False,
+            "pan_last_x": 0.0,
+            "pan_last_y": 0.0,
+            "view_offset_x": 0.0,
+            "view_offset_y": 0.0,
+            "page_items": {},
+            "page_photo": None,
+            "page_dim": (0, 0, 0, 0),  # origin_x, origin_y, disp_w, disp_h
+            "selection_rect": None,
+        }
+        page_cache = {}
+        sig_render_cache = {}
+        zoom_state = {"factor": 1.0}
+
+        def get_current_profile():
+            page_dict = ensure_page_state(current_page["value"])
+            key = active_path_var.get()
+            if key not in page_dict:
+                key = preview_paths[0]
+                active_path_var.set(key)
+            return page_dict[key]
+
+        def sync_sliders_from_active():
+            profile = get_current_profile()
+            state["suspend"] = True
+            opacity_var.set(profile["opacity"] * 100.0)
+            size_var.set(profile["size_ratio"] * 100.0)
+            state["suspend"] = False
+
+        def update_page_info():
+            page_info_var.set(
+                f"预览文件: {os.path.basename(source_pdf)}  第{current_page['value']}页 / 共{page_count}页"
+            )
+            prev_btn.config(state=("normal" if current_page["value"] > 1 else "disabled"))
+            next_btn.config(state=("normal" if current_page["value"] < page_count else "disabled"))
+            zoom_info_var.set(f"页面缩放 {int(zoom_state['factor'] * 100)}%（滚轮）")
+
+        def get_page_display(page_no, fit_w, fit_h):
+            zoom_key = int(zoom_state["factor"] * 1000)
+            fit_w = max(220, int(fit_w))
+            fit_h = max(220, int(fit_h))
+            cache_key = (page_no, zoom_key, fit_w, fit_h)
+            if cache_key in page_cache:
+                return page_cache[cache_key]
+            page = doc[page_no - 1]
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
+            pil_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            max_w, max_h = fit_w, fit_h
+            base_scale = min(max_w / pil_img.width, max_h / pil_img.height, 1.0)
+            scale = max(0.12, base_scale * zoom_state["factor"])
+            disp_w = max(1, int(pil_img.width * scale))
+            disp_h = max(1, int(pil_img.height * scale))
+            disp = pil_img.resize((disp_w, disp_h), Image.LANCZOS) if (disp_w != pil_img.width or disp_h != pil_img.height) else pil_img.copy()
+            page_cache[cache_key] = (disp, disp_w, disp_h)
+            return page_cache[cache_key]
+
+        def get_signature_image(path, profile, disp_w):
+            op_key = int(self._clamp_value(profile["opacity"], 0.05, 1.0, 0.85) * 1000)
+            size_key = int(self._clamp_value(profile["size_ratio"], 0.03, 0.7, 0.18) * 1000)
+            cache_key = (path, op_key, size_key, bool(self.stamp_remove_white_bg_var.get()), disp_w)
+            if cache_key in sig_render_cache:
+                return sig_render_cache[cache_key]
+            base = self._get_stamp_base_image_cached(path, remove_white=bool(self.stamp_remove_white_bg_var.get()))
+            base = PDFBatchStampConverter._apply_alpha(base.copy(), profile["opacity"])
+            ratio = base.height / max(1, base.width)
+            min_w = 12
+            min_h = 12
+            tw = max(min_w, int(round(disp_w * profile["size_ratio"])))
+            th = max(1, int(round(tw * ratio)))
+            if th < min_h:
+                th = min_h
+                tw = max(min_w, int(round(th / max(ratio, 1e-6))))
+            out = base.resize((tw, th), Image.LANCZOS)
+            sig_render_cache[cache_key] = out
+            return out
+
+        def update_enabled_vars_for_page():
+            page_dict = ensure_page_state(current_page["value"])
+            state["suspend"] = True
+            for path in preview_paths:
+                enabled_vars[path].set(bool(page_dict[path].get("enabled", False)))
+            state["suspend"] = False
+
+        def redraw():
+            page_dict = ensure_page_state(current_page["value"])
+            update_page_info()
+            pad = 22
+            canvas.update_idletasks()
+            cw = max(1, canvas.winfo_width())
+            ch = max(1, canvas.winfo_height())
+            fit_w = max(220, cw - pad * 2)
+            fit_h = max(220, ch - pad * 2)
+            disp_img, disp_w, disp_h = get_page_display(current_page["value"], fit_w, fit_h)
+            base_x = (cw - disp_w) / 2.0
+            base_y = (ch - disp_h) / 2.0
+            if disp_w + pad * 2 <= cw:
+                origin_x = base_x
+                state["view_offset_x"] = 0.0
+            else:
+                min_x = cw - disp_w - pad
+                max_x = pad
+                origin_x = base_x + state["view_offset_x"]
+                origin_x = max(min_x, min(max_x, origin_x))
+                state["view_offset_x"] = origin_x - base_x
+
+            if disp_h + pad * 2 <= ch:
+                origin_y = base_y
+                state["view_offset_y"] = 0.0
+            else:
+                min_y = ch - disp_h - pad
+                max_y = pad
+                origin_y = base_y + state["view_offset_y"]
+                origin_y = max(min_y, min(max_y, origin_y))
+                state["view_offset_y"] = origin_y - base_y
+            state["page_dim"] = (origin_x, origin_y, disp_w, disp_h)
+            canvas.delete("all")
+            state["page_items"] = {}
+            page_tk = ImageTk.PhotoImage(disp_img)
+            state["page_photo"] = page_tk
+            canvas.create_image(origin_x, origin_y, anchor="nw", image=page_tk)
+            canvas.create_rectangle(origin_x, origin_y, origin_x + disp_w, origin_y + disp_h, outline="#bbbbbb")
+
+            for path in preview_paths:
+                prof = page_dict[path]
+                prof["enabled"] = bool(prof.get("enabled", False))
+                if not prof["enabled"]:
+                    continue
+                img = get_signature_image(path, prof, disp_w)
+                rw, rh = img.size
+                cx = origin_x + prof["x_ratio"] * disp_w
+                cy = origin_y + prof["y_ratio"] * disp_h
+                x = max(origin_x, min(cx - rw / 2, origin_x + disp_w - rw))
+                y = max(origin_y, min(cy - rh / 2, origin_y + disp_h - rh))
+                prof["x_ratio"] = self._clamp_value((x + rw / 2 - origin_x) / max(1, disp_w), 0.0, 1.0, 0.85)
+                prof["y_ratio"] = self._clamp_value((y + rh / 2 - origin_y) / max(1, disp_h), 0.0, 1.0, 0.85)
+                tk_img = ImageTk.PhotoImage(img)
+                cid = canvas.create_image(int(x), int(y), anchor="nw", image=tk_img)
+                state["page_items"][path] = {"id": cid, "photo": tk_img, "bbox": (x, y, x + rw, y + rh), "size": (rw, rh)}
+
+            active = active_path_var.get()
+            item = state["page_items"].get(active)
+            if item and item.get("bbox"):
+                x1, y1, x2, y2 = item["bbox"]
+                state["selection_rect"] = canvas.create_rectangle(
+                    x1 - 2, y1 - 2, x2 + 2, y2 + 2,
+                    outline="#1e88e5", width=2, dash=(4, 2)
+                )
+            else:
+                state["selection_rect"] = None
+
+        def hit_test(x, y):
+            for path in reversed(preview_paths):
+                item = state["page_items"].get(path)
+                if not item or not item.get("bbox"):
+                    continue
+                x1, y1, x2, y2 = item["bbox"]
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    return path
+            return ""
+
+        def on_press(event):
+            path = hit_test(event.x, event.y)
+            if not path:
+                state["drag_path"] = None
+                state["pan_active"] = True
+                state["pan_last_x"] = event.x
+                state["pan_last_y"] = event.y
+                return
+            state["pan_active"] = False
+            active_path_var.set(path)
+            sync_sliders_from_active()
+            item = state["page_items"].get(path)
+            if not item:
+                return
+            x1, y1, x2, y2 = item["bbox"]
+            state["drag_path"] = path
+            state["drag_offset_x"] = event.x - (x1 + x2) / 2
+            state["drag_offset_y"] = event.y - (y1 + y2) / 2
+
+        def on_drag(event):
+            path = state.get("drag_path")
+            if path:
+                item = state["page_items"].get(path)
+                if not item:
+                    return
+                origin_x, origin_y, disp_w, disp_h = state["page_dim"]
+                w, h = item.get("size", (0, 0))
+                if w <= 0 or h <= 0:
+                    return
+                cx = event.x - state["drag_offset_x"]
+                cy = event.y - state["drag_offset_y"]
+                cx = max(origin_x + w / 2, min(cx, origin_x + disp_w - w / 2))
+                cy = max(origin_y + h / 2, min(cy, origin_y + disp_h - h / 2))
+                x = cx - w / 2
+                y = cy - h / 2
+                canvas.coords(item["id"], int(x), int(y))
+                item["bbox"] = (x, y, x + w, y + h)
+                page_dict = ensure_page_state(current_page["value"])
+                prof = page_dict[path]
+                prof["x_ratio"] = self._clamp_value((cx - origin_x) / max(1, disp_w), 0.0, 1.0, 0.85)
+                prof["y_ratio"] = self._clamp_value((cy - origin_y) / max(1, disp_h), 0.0, 1.0, 0.85)
+                if state["selection_rect"] is not None:
+                    canvas.coords(state["selection_rect"], x - 2, y - 2, x + w + 2, y + h + 2)
+                return
+            if state.get("pan_active"):
+                dx = event.x - state["pan_last_x"]
+                dy = event.y - state["pan_last_y"]
+                state["pan_last_x"] = event.x
+                state["pan_last_y"] = event.y
+                state["view_offset_x"] += dx
+                state["view_offset_y"] += dy
+                redraw()
+                return
+
+        def on_release(_event):
+            state["drag_path"] = None
+            state["pan_active"] = False
+
+        def on_slider_change(_value=None):
+            if state["suspend"]:
+                return
+            page_dict = ensure_page_state(current_page["value"])
+            key = active_path_var.get()
+            if key not in page_dict:
+                return
+            prof = page_dict[key]
+            prof["opacity"] = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.85)
+            prof["size_ratio"] = self._clamp_value(size_var.get() / 100.0, 0.03, 0.7, 0.18)
+            redraw()
+
+        def on_enable_changed(path):
+            if state["suspend"]:
+                return
+            page_dict = ensure_page_state(current_page["value"])
+            page_dict[path]["enabled"] = bool(enabled_vars[path].get())
+            redraw()
+
+        def goto_page(new_page):
+            if new_page < 1 or new_page > page_count:
+                return
+            current_page["value"] = new_page
+            ensure_page_state(new_page)
+            update_enabled_vars_for_page()
+            sync_sliders_from_active()
+            redraw()
+
+        def go_prev():
+            goto_page(current_page["value"] - 1)
+
+        def go_next():
+            goto_page(current_page["value"] + 1)
+
+        def on_canvas_wheel(event):
+            delta = 0
+            if getattr(event, "delta", 0):
+                delta = event.delta
+            elif getattr(event, "num", None) == 4:
+                delta = 120
+            elif getattr(event, "num", None) == 5:
+                delta = -120
+            if delta == 0:
+                return "break"
+            factor = zoom_state["factor"]
+            if delta > 0:
+                factor *= 1.1
+            else:
+                factor /= 1.1
+            zoom_state["factor"] = self._clamp_value(factor, 0.2, 2.4, 1.0)
+            if len(page_cache) > 40:
+                page_cache.clear()
+            redraw()
+            return "break"
+
+        prev_btn.config(command=go_prev)
+        next_btn.config(command=go_next)
+        for p in preview_paths:
+            enabled_vars[p].trace_add("write", lambda *_a, path=p: on_enable_changed(path))
+        active_path_var.trace_add("write", lambda *_a: (sync_sliders_from_active(), redraw()))
+        opacity_scale.configure(command=on_slider_change)
+        size_scale.configure(command=on_slider_change)
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        canvas.bind("<MouseWheel>", on_canvas_wheel)
+        canvas.bind("<Button-4>", on_canvas_wheel)
+        canvas.bind("<Button-5>", on_canvas_wheel)
+        canvas.bind("<Configure>", lambda _e: redraw())
+
+        action_frame = tk.Frame(preview_win)
+        action_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 12))
+
+        def apply_preview():
+            compact = {}
+            for page_key, data in page_profiles.items():
+                if not isinstance(data, dict):
+                    continue
+                kept = {}
+                for path, prof in data.items():
+                    full = os.path.abspath(str(path))
+                    if full not in preview_paths:
+                        continue
+                    norm = self._normalize_stamp_profile(prof)
+                    norm["enabled"] = bool(prof.get("enabled", False))
+                    if norm["enabled"]:
+                        kept[full] = norm
+                if kept:
+                    compact[str(int(page_key))] = kept
+            self.signature_page_profiles = compact
+            self._update_stamp_preview_info()
+            self.save_settings()
+            try:
+                doc.close()
+            except Exception:
+                pass
+            preview_win.destroy()
+
+        def on_close():
+            try:
+                doc.close()
+            except Exception:
+                pass
+            preview_win.destroy()
+
+        tk.Button(action_frame, text="取消", command=on_close,
+                  font=("Microsoft YaHei", 9), width=12).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(action_frame, text="应用到批量签名", command=apply_preview,
+                  font=("Microsoft YaHei", 9, "bold"), width=14).pack(side=tk.RIGHT)
+
+        preview_win.protocol("WM_DELETE_WINDOW", on_close)
+        ensure_page_state(1)
+        update_enabled_vars_for_page()
+        sync_sliders_from_active()
+        redraw()
 
     def _resolve_preview_pdf(self):
         if self.selected_files_list:
@@ -1529,9 +2316,116 @@ class PDFConverterApp:
             return selected
         return None
 
+    @staticmethod
+    def _get_file_mtime_safe(path):
+        try:
+            return os.path.getmtime(path)
+        except Exception:
+            return 0.0
+
+    def _preheat_pdf_metadata_async(self, paths):
+        pdfs = []
+        for p in paths or []:
+            if not p:
+                continue
+            full = os.path.abspath(str(p))
+            if full.lower().endswith(".pdf") and os.path.exists(full):
+                pdfs.append(full)
+        if not pdfs:
+            return
+        # 控制后台负载：仅预热前3个
+        todo = pdfs[:3]
+
+        def worker():
+            for pdf_path in todo:
+                mtime = self._get_file_mtime_safe(pdf_path)
+                with self._preview_cache_lock:
+                    old = self._pdf_preview_cache.get(pdf_path)
+                    if old and old.get("mtime") == mtime and old.get("first_page_png"):
+                        continue
+                try:
+                    doc = fitz.open(pdf_path)
+                    try:
+                        page_count = len(doc)
+                        if page_count <= 0:
+                            continue
+                        pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
+                        png_bytes = pix.tobytes("png")
+                    finally:
+                        doc.close()
+                    with self._preview_cache_lock:
+                        self._pdf_preview_cache[pdf_path] = {
+                            "mtime": mtime,
+                            "page_count": page_count,
+                            "first_page_png": png_bytes,
+                        }
+                        if len(self._pdf_preview_cache) > 20:
+                            self._pdf_preview_cache = dict(list(self._pdf_preview_cache.items())[-10:])
+                except Exception:
+                    continue
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _get_stamp_base_image_cached(self, path, remove_white=False):
+        full = os.path.abspath(path)
+        mtime = self._get_file_mtime_safe(full)
+        key = (full, mtime, bool(remove_white))
+        with self._preview_cache_lock:
+            cached = self._stamp_base_image_cache.get(key)
+            if cached is not None:
+                return cached.copy()
+
+        img = Image.open(full).convert("RGBA")
+        if remove_white:
+            img = PDFBatchStampConverter._remove_white_background(img)
+
+        with self._preview_cache_lock:
+            self._stamp_base_image_cache[key] = img.copy()
+            if len(self._stamp_base_image_cache) > 80:
+                self._stamp_base_image_cache = dict(list(self._stamp_base_image_cache.items())[-40:])
+        return img
+
+    def _preheat_stamp_images_async(self, paths):
+        images = []
+        for p in paths or []:
+            if not p:
+                continue
+            full = os.path.abspath(str(p))
+            ext = os.path.splitext(full)[1].lower()
+            if ext in (".png", ".jpg", ".jpeg", ".bmp") and os.path.exists(full):
+                images.append(full)
+        if not images:
+            return
+        todo = images[:8]
+        remove_white = bool(self.stamp_remove_white_bg_var.get())
+
+        def worker():
+            for img_path in todo:
+                try:
+                    _ = self._get_stamp_base_image_cached(img_path, remove_white=False)
+                    if remove_white:
+                        _ = self._get_stamp_base_image_cached(img_path, remove_white=True)
+                except Exception:
+                    continue
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _build_template_preview_image(self, opacity):
         if not self.stamp_template_path or not os.path.exists(self.stamp_template_path):
             return None
+        template_path = os.path.abspath(self.stamp_template_path)
+        mtime = self._get_file_mtime_safe(template_path)
+        op_key = int(self._clamp_value(opacity, 0.05, 1.0, 0.85) * 1000)
+        rm_bg = bool(self.stamp_remove_white_bg_var.get())
+        cache_key = (template_path, mtime, op_key, rm_bg)
+        with self._preview_cache_lock:
+            cached_png = self._template_preview_cache.get(cache_key)
+        if cached_png:
+            try:
+                return Image.open(io.BytesIO(cached_png)).convert("RGBA")
+            except Exception:
+                pass
+
         try:
             with open(self.stamp_template_path, "r", encoding="utf-8") as f:
                 template = json.load(f)
@@ -1547,7 +2441,14 @@ class PDFConverterApp:
                     image = Image.open(image_path).convert("RGBA")
                     if self.stamp_remove_white_bg_var.get():
                         image = PDFBatchStampConverter._remove_white_background(image)
-                    return PDFBatchStampConverter._apply_alpha(image, opacity)
+                    out_img = PDFBatchStampConverter._apply_alpha(image, opacity)
+                    buf = io.BytesIO()
+                    out_img.save(buf, format="PNG")
+                    with self._preview_cache_lock:
+                        self._template_preview_cache[cache_key] = buf.getvalue()
+                        if len(self._template_preview_cache) > 80:
+                            self._template_preview_cache = dict(list(self._template_preview_cache.items())[-40:])
+                    return out_img
             elif elem_type == "qr":
                 text = str(elem.get("text", "")).strip()
                 if text:
@@ -1557,7 +2458,14 @@ class PDFConverterApp:
                             opacity=opacity,
                             remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
                         )
-                        return Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                        out_img = Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                        buf = io.BytesIO()
+                        out_img.save(buf, format="PNG")
+                        with self._preview_cache_lock:
+                            self._template_preview_cache[cache_key] = buf.getvalue()
+                            if len(self._template_preview_cache) > 80:
+                                self._template_preview_cache = dict(list(self._template_preview_cache.items())[-40:])
+                        return out_img
                     except Exception:
                         return None
             elif elem_type == "text":
@@ -1566,54 +2474,90 @@ class PDFConverterApp:
                     image = Image.new("RGBA", (520, 120), (255, 255, 255, 0))
                     draw = ImageDraw.Draw(image)
                     draw.text((10, 40), text, fill=(220, 0, 0, 255))
-                    return PDFBatchStampConverter._apply_alpha(image, opacity)
+                    out_img = PDFBatchStampConverter._apply_alpha(image, opacity)
+                    buf = io.BytesIO()
+                    out_img.save(buf, format="PNG")
+                    with self._preview_cache_lock:
+                        self._template_preview_cache[cache_key] = buf.getvalue()
+                        if len(self._template_preview_cache) > 80:
+                            self._template_preview_cache = dict(list(self._template_preview_cache.items())[-40:])
+                    return out_img
         return None
 
-    def _open_stamp_preview(self):
-        if not PIL_AVAILABLE:
-            messagebox.showwarning("提示", "预览需要 Pillow 依赖。")
-            return
-        if not FITZ_UI_AVAILABLE:
-            messagebox.showwarning("提示", "预览需要 PyMuPDF 依赖。")
-            return
-
-        mode_key = self._get_stamp_mode_key()
-        active_stamp_path = self._get_active_stamp_image_path()
-        if mode_key in ("seal", "seam") and not active_stamp_path:
-            messagebox.showwarning("提示", "请先选择章图。")
-            return
-        if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
-            messagebox.showwarning("提示", "请先填写二维码内容。")
-            return
-        if mode_key == "template" and not (self.stamp_template_path and os.path.exists(self.stamp_template_path)):
-            messagebox.showwarning("提示", "请先选择模板 JSON。")
-            return
-
-        source_pdf = self._resolve_preview_pdf()
-        if not source_pdf:
-            messagebox.showwarning("提示", "请先选择至少一个 PDF 文件，再打开预览。")
-            return
-
-        try:
-            doc = fitz.open(source_pdf)
-            if len(doc) == 0:
-                doc.close()
-                messagebox.showwarning("提示", "该PDF没有可预览的页面。")
+    def _open_stamp_preview(self, preloaded=None):
+        if preloaded is None:
+            if not PIL_AVAILABLE:
+                messagebox.showwarning("提示", "预览需要 Pillow 依赖。")
                 return
-            first_page = doc[0]
-            page_count = len(doc)
-            pix = first_page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
-            page_image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-            doc.close()
-        except Exception as exc:
-            messagebox.showerror("预览失败", f"读取PDF预览失败：\n{exc}")
+            if not FITZ_UI_AVAILABLE:
+                messagebox.showwarning("提示", "预览需要 PyMuPDF 依赖。")
+                return
+
+            mode_key = self._get_stamp_mode_key()
+            if mode_key == "signature":
+                self._open_signature_preview()
+                return
+            active_stamp_path = self._get_active_stamp_image_path()
+            if mode_key in ("seal", "seam") and not active_stamp_path:
+                messagebox.showwarning("提示", "请先选择章图。")
+                return
+            if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
+                messagebox.showwarning("提示", "请先填写二维码内容。")
+                return
+            if mode_key == "template" and not (self.stamp_template_path and os.path.exists(self.stamp_template_path)):
+                messagebox.showwarning("提示", "请先选择模板 JSON。")
+                return
+
+            source_pdf = self._resolve_preview_pdf()
+            if not source_pdf:
+                messagebox.showwarning("提示", "请先选择至少一个 PDF 文件，再打开预览。")
+                return
+
+            loading_win, loading_pb = self._show_loading_dialog(
+                "盖章预览加载中", "正在读取PDF页面预览，请稍候..."
+            )
+
+            def worker():
+                try:
+                    payload, err = self._load_stamp_preview_data(source_pdf)
+                except Exception as exc:
+                    payload, err = None, str(exc)
+
+                def on_done():
+                    try:
+                        loading_pb.stop()
+                    except Exception:
+                        pass
+                    try:
+                        loading_win.destroy()
+                    except Exception:
+                        pass
+                    if err or not payload:
+                        messagebox.showerror("预览失败", f"读取PDF预览失败：\n{err or '未知错误'}")
+                        return
+                    page_image, page_count = payload
+                    self._open_stamp_preview(preloaded={
+                        "mode_key": mode_key,
+                        "active_stamp_path": active_stamp_path,
+                        "source_pdf": source_pdf,
+                        "page_image": page_image,
+                        "page_count": page_count,
+                    })
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
             return
 
-        max_w, max_h = 760, 500
-        scale = min(max_w / page_image.width, max_h / page_image.height, 1.0)
-        disp_w = max(1, int(page_image.width * scale))
-        disp_h = max(1, int(page_image.height * scale))
-        page_display = page_image.resize((disp_w, disp_h), Image.LANCZOS) if scale < 0.999 else page_image.copy()
+        mode_key = preloaded.get("mode_key", self._get_stamp_mode_key())
+        active_stamp_path = preloaded.get("active_stamp_path", self._get_active_stamp_image_path())
+        source_pdf = preloaded.get("source_pdf", "")
+        page_image = preloaded.get("page_image")
+        page_count = preloaded.get("page_count", 1)
+        if page_image is None:
+            messagebox.showerror("预览失败", "预览数据为空，请重试。")
+            return
+
         pad = 24
 
         preview_paths = []
@@ -1634,15 +2578,17 @@ class PDFConverterApp:
 
         preview_win = tk.Toplevel(self.root)
         preview_win.title("盖章预览")
-        win_w = max(960, disp_w + 160)
-        win_h = max(760, disp_h + 300)
-        screen_w = max(1000, self.root.winfo_screenwidth())
-        screen_h = max(800, self.root.winfo_screenheight())
-        win_w = min(win_w, screen_w - 80)
-        win_h = min(win_h, screen_h - 80)
-        preview_win.geometry(f"{int(win_w)}x{int(win_h)}")
-        preview_win.minsize(920, 700)
-        preview_win.resizable(False, False)
+        screen_w = max(1000, preview_win.winfo_screenwidth())
+        screen_h = max(760, preview_win.winfo_screenheight())
+        win_w = min(1100, screen_w - 80)
+        win_h = min(820, screen_h - 120)
+        win_w = max(880, win_w)
+        win_h = max(620, win_h)
+        pos_x = max(0, int((screen_w - win_w) / 2))
+        pos_y = max(0, int((screen_h - win_h) / 2))
+        preview_win.geometry(f"{int(win_w)}x{int(win_h)}+{pos_x}+{pos_y}")
+        preview_win.minsize(820, 600)
+        preview_win.resizable(True, True)
         preview_win.transient(self.root)
         preview_win.grab_set()
 
@@ -1681,18 +2627,13 @@ class PDFConverterApp:
         canvas_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=8)
         canvas = tk.Canvas(
             canvas_frame,
-            width=disp_w + pad * 2,
-            height=disp_h + pad * 2,
+            width=900,
+            height=480,
             bg="#f5f5f5",
             highlightthickness=1,
             highlightbackground="#cccccc",
         )
         canvas.pack(fill=tk.BOTH, expand=True)
-
-        page_tk = ImageTk.PhotoImage(page_display)
-        canvas.create_image(pad, pad, anchor="nw", image=page_tk)
-        canvas.page_tk = page_tk
-        canvas.create_rectangle(pad, pad, pad + disp_w, pad + disp_h, outline="#bbbbbb")
 
         state = {
             "render_job": None,
@@ -1700,11 +2641,17 @@ class PDFConverterApp:
             "drag_path": None,
             "drag_offset_x": 0.0,
             "drag_offset_y": 0.0,
+            "page_tk": None,
+            "page_image_id": None,
+            "page_border_id": None,
+            "page_dim": (0.0, 0.0, 1.0, 1.0),  # origin_x, origin_y, disp_w, disp_h
             "stamp_items": {},
             "selection_rect": canvas.create_rectangle(0, 0, 0, 0, outline="#1e88e5", width=2, dash=(4, 2), state="hidden"),
         }
+        page_cache = {}
         image_cache = {}
         render_cache = {}
+        qr_src_cache = {}
 
         def get_active_key():
             if mode_key in ("seal", "seam"):
@@ -1728,23 +2675,36 @@ class PDFConverterApp:
             size_var.set(profile["size_ratio"] * 100.0)
             state["suspend_slider"] = False
 
+        def get_page_display(fit_w, fit_h):
+            fit_w = max(220, int(fit_w))
+            fit_h = max(220, int(fit_h))
+            cache_key = (fit_w, fit_h)
+            if cache_key in page_cache:
+                return page_cache[cache_key]
+            scale = min(fit_w / page_image.width, fit_h / page_image.height, 1.0)
+            disp_w = max(1, int(page_image.width * scale))
+            disp_h = max(1, int(page_image.height * scale))
+            disp = page_image.resize((disp_w, disp_h), Image.LANCZOS) if (disp_w != page_image.width or disp_h != page_image.height) else page_image.copy()
+            page_cache[cache_key] = (disp, disp_w, disp_h)
+            return page_cache[cache_key]
+
         def get_base_image(path):
             cache_key = (path, bool(self.stamp_remove_white_bg_var.get()))
             if cache_key in image_cache:
                 return image_cache[cache_key]
-            img = Image.open(path).convert("RGBA")
-            if self.stamp_remove_white_bg_var.get():
-                img = PDFBatchStampConverter._remove_white_background(img)
+            img = self._get_stamp_base_image_cached(
+                path, remove_white=bool(self.stamp_remove_white_bg_var.get())
+            )
             image_cache[cache_key] = img
             return img
 
-        def get_render_image(path, profile, mode):
+        def get_render_image(path, profile, mode, disp_w, disp_h):
             op_key = int(self._clamp_value(profile["opacity"], 0.05, 1.0, 0.85) * 1000)
             size_key = int(self._clamp_value(profile["size_ratio"], 0.03, 0.7, 0.18) * 1000)
             side_key = self.stamp_seam_side_var.get()
             align_key = self.stamp_seam_align_var.get()
             overlap_key = int(self._clamp_value(self.stamp_seam_overlap_var.get(), 0.05, 0.95, 0.25) * 1000)
-            cache_key = (path, mode, op_key, size_key, side_key, align_key, overlap_key, page_count, disp_w, disp_h, bool(self.stamp_remove_white_bg_var.get()))
+            cache_key = (path, mode, op_key, size_key, side_key, align_key, overlap_key, page_count, int(disp_w), int(disp_h), bool(self.stamp_remove_white_bg_var.get()))
             if cache_key in render_cache:
                 return render_cache[cache_key]
 
@@ -1784,7 +2744,7 @@ class PDFConverterApp:
 
             return None
 
-        def schedule_redraw(delay_ms=16):
+        def schedule_redraw(delay_ms=24):
             if state["render_job"] is not None:
                 try:
                     preview_win.after_cancel(state["render_job"])
@@ -1794,6 +2754,30 @@ class PDFConverterApp:
 
         def redraw():
             state["render_job"] = None
+            canvas.update_idletasks()
+            cw = max(1, canvas.winfo_width())
+            ch = max(1, canvas.winfo_height())
+            fit_w = max(220, cw - pad * 2)
+            fit_h = max(220, ch - pad * 2)
+            disp_img, disp_w, disp_h = get_page_display(fit_w, fit_h)
+            origin_x = (cw - disp_w) / 2.0
+            origin_y = (ch - disp_h) / 2.0
+            state["page_dim"] = (origin_x, origin_y, disp_w, disp_h)
+
+            if state["page_image_id"] is None:
+                page_tk = ImageTk.PhotoImage(disp_img)
+                state["page_tk"] = page_tk
+                state["page_image_id"] = canvas.create_image(origin_x, origin_y, anchor="nw", image=page_tk)
+                state["page_border_id"] = canvas.create_rectangle(
+                    origin_x, origin_y, origin_x + disp_w, origin_y + disp_h, outline="#bbbbbb"
+                )
+            else:
+                page_tk = ImageTk.PhotoImage(disp_img)
+                state["page_tk"] = page_tk
+                canvas.itemconfigure(state["page_image_id"], image=page_tk)
+                canvas.coords(state["page_image_id"], origin_x, origin_y)
+                canvas.coords(state["page_border_id"], origin_x, origin_y, origin_x + disp_w, origin_y + disp_h)
+
             active_key = get_active_key()
             if mode_key in ("seal", "seam"):
                 enabled_paths = [p for p in preview_paths if enabled_vars[p].get()]
@@ -1809,17 +2793,17 @@ class PDFConverterApp:
                             item["bbox"] = None
                         continue
 
-                    rendered = get_render_image(path, profile, mode_key)
+                    rendered = get_render_image(path, profile, mode_key, disp_w, disp_h)
                     if rendered is None:
                         continue
                     rw, rh = rendered.size
                     if mode_key == "seal":
-                        cx = pad + profile["x_ratio"] * disp_w
-                        cy = pad + profile["y_ratio"] * disp_h
-                        x = max(pad, min(cx - rw / 2, pad + disp_w - rw))
-                        y = max(pad, min(cy - rh / 2, pad + disp_h - rh))
-                        profile["x_ratio"] = self._clamp_value((x + rw / 2 - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
-                        profile["y_ratio"] = self._clamp_value((y + rh / 2 - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+                        cx = origin_x + profile["x_ratio"] * disp_w
+                        cy = origin_y + profile["y_ratio"] * disp_h
+                        x = max(origin_x, min(cx - rw / 2, origin_x + disp_w - rw))
+                        y = max(origin_y, min(cy - rh / 2, origin_y + disp_h - rh))
+                        profile["x_ratio"] = self._clamp_value((x + rw / 2 - origin_x) / max(1, disp_w), 0.0, 1.0, 0.85)
+                        profile["y_ratio"] = self._clamp_value((y + rh / 2 - origin_y) / max(1, disp_h), 0.0, 1.0, 0.85)
                     else:
                         side = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}.get(self.stamp_seam_side_var.get(), "right")
                         align = {"居中": "center", "顶部": "top", "底部": "bottom"}.get(self.stamp_seam_align_var.get(), "center")
@@ -1827,12 +2811,12 @@ class PDFConverterApp:
                         vis_idx = enabled_paths.index(path) if path in enabled_paths else 0
                         stack_off = vis_idx * 6
                         if side in ("left", "right"):
-                            y = pad if align == "top" else (pad + disp_h - rh if align == "bottom" else pad + (disp_h - rh) / 2)
-                            x = pad + disp_w - rw * (1.0 - overlap) if side == "right" else pad - rw * overlap
+                            y = origin_y if align == "top" else (origin_y + disp_h - rh if align == "bottom" else origin_y + (disp_h - rh) / 2)
+                            x = origin_x + disp_w - rw * (1.0 - overlap) if side == "right" else origin_x - rw * overlap
                             y += stack_off
                         else:
-                            x = pad if align == "top" else (pad + disp_w - rw if align == "bottom" else pad + (disp_w - rw) / 2)
-                            y = pad - rh * overlap if side == "top" else pad + disp_h - rh * (1.0 - overlap)
+                            x = origin_x if align == "top" else (origin_x + disp_w - rw if align == "bottom" else origin_x + (disp_w - rw) / 2)
+                            y = origin_y - rh * overlap if side == "top" else origin_y + disp_h - rh * (1.0 - overlap)
                             x += stack_off
 
                     tk_img = ImageTk.PhotoImage(rendered)
@@ -1860,12 +2844,20 @@ class PDFConverterApp:
                 profile["size_ratio"] = self._clamp_value(profile.get("size_ratio", 0.18), 0.03, 0.7, 0.18)
                 if mode_key == "qr":
                     try:
-                        qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
+                        qr_key = (
                             self.stamp_qr_text_var.get().strip(),
-                            opacity=profile["opacity"],
-                            remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+                            int(profile["opacity"] * 1000),
+                            bool(self.stamp_remove_white_bg_var.get()),
                         )
-                        src = Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                        src = qr_src_cache.get(qr_key)
+                        if src is None:
+                            qr_bytes = PDFBatchStampConverter._make_qr_png_bytes(
+                                self.stamp_qr_text_var.get().strip(),
+                                opacity=profile["opacity"],
+                                remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+                            )
+                            src = Image.open(io.BytesIO(qr_bytes)).convert("RGBA")
+                            qr_src_cache[qr_key] = src
                     except Exception:
                         src = None
                 else:
@@ -1878,10 +2870,10 @@ class PDFConverterApp:
                 tw = max(16, int(disp_w * profile["size_ratio"]))
                 th = max(16, int(tw * src.height / max(1, src.width)))
                 img = src.resize((tw, th), Image.LANCZOS)
-                x = max(pad, min(pad + profile["x_ratio"] * disp_w - tw / 2, pad + disp_w - tw))
-                y = max(pad, min(pad + profile["y_ratio"] * disp_h - th / 2, pad + disp_h - th))
-                profile["x_ratio"] = self._clamp_value((x + tw / 2 - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
-                profile["y_ratio"] = self._clamp_value((y + th / 2 - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+                x = max(origin_x, min(origin_x + profile["x_ratio"] * disp_w - tw / 2, origin_x + disp_w - tw))
+                y = max(origin_y, min(origin_y + profile["y_ratio"] * disp_h - th / 2, origin_y + disp_h - th))
+                profile["x_ratio"] = self._clamp_value((x + tw / 2 - origin_x) / max(1, disp_w), 0.0, 1.0, 0.85)
+                profile["y_ratio"] = self._clamp_value((y + th / 2 - origin_y) / max(1, disp_h), 0.0, 1.0, 0.85)
                 tk_img = ImageTk.PhotoImage(img)
                 if item is None:
                     cid = canvas.create_image(int(x), int(y), anchor="nw", image=tk_img)
@@ -1897,10 +2889,10 @@ class PDFConverterApp:
 
         def on_active_change(*_args):
             sync_sliders_from_active()
-            schedule_redraw(1)
+            schedule_redraw(12)
 
         def on_enabled_change(*_args):
-            schedule_redraw(1)
+            schedule_redraw(12)
 
         def on_slider_change(_value=None):
             if state["suspend_slider"]:
@@ -1911,7 +2903,7 @@ class PDFConverterApp:
             profile = get_profile(key)
             profile["opacity"] = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.85)
             profile["size_ratio"] = self._clamp_value(size_var.get() / 100.0, 0.03, 0.7, 0.18)
-            schedule_redraw(8)
+            schedule_redraw(24)
 
         def hit_test_path(x, y):
             for p in reversed(preview_paths):
@@ -1959,20 +2951,21 @@ class PDFConverterApp:
             item = state["stamp_items"].get(p)
             if not item:
                 return
+            origin_x, origin_y, disp_w, disp_h = state["page_dim"]
             w, h = item.get("size", (0, 0))
             if w <= 0 or h <= 0:
                 return
             cx = event.x - state["drag_offset_x"]
             cy = event.y - state["drag_offset_y"]
-            cx = max(pad + w / 2, min(cx, pad + disp_w - w / 2))
-            cy = max(pad + h / 2, min(cy, pad + disp_h - h / 2))
+            cx = max(origin_x + w / 2, min(cx, origin_x + disp_w - w / 2))
+            cy = max(origin_y + h / 2, min(cy, origin_y + disp_h - h / 2))
             x = cx - w / 2
             y = cy - h / 2
             canvas.coords(item["id"], int(x), int(y))
             item["bbox"] = (x, y, x + w, y + h)
             prof = get_profile(p)
-            prof["x_ratio"] = self._clamp_value((cx - pad) / max(1, disp_w), 0.0, 1.0, 0.85)
-            prof["y_ratio"] = self._clamp_value((cy - pad) / max(1, disp_h), 0.0, 1.0, 0.85)
+            prof["x_ratio"] = self._clamp_value((cx - origin_x) / max(1, disp_w), 0.0, 1.0, 0.85)
+            prof["y_ratio"] = self._clamp_value((cy - origin_y) / max(1, disp_h), 0.0, 1.0, 0.85)
             canvas.coords(state["selection_rect"], x - 2, y - 2, x + w + 2, y + h + 2)
 
         def on_release(_event):
@@ -1983,9 +2976,15 @@ class PDFConverterApp:
                 ev.trace_add("write", on_enabled_change)
             active_path_var.trace_add("write", on_active_change)
 
+        def on_canvas_configure(_event=None):
+            if len(page_cache) > 40:
+                page_cache.clear()
+            schedule_redraw(50)
+
         canvas.bind("<ButtonPress-1>", on_press)
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_release)
+        canvas.bind("<Configure>", on_canvas_configure)
         opacity_scale.configure(command=on_slider_change)
         size_scale.configure(command=on_slider_change)
 
@@ -2070,6 +3069,8 @@ class PDFConverterApp:
         mode_key = self._get_stamp_mode_key()
         if mode_key == "seal":
             self.stamp_hint_var.set("普通章：支持多个章图，预览中勾选章图并拖拽定位，可调透明度和缩放。")
+        elif mode_key == "signature":
+            self.stamp_hint_var.set("签名：支持多个签名，预览中可翻页勾选签名并逐页拖拽定位、缩放、调透明度。")
         elif mode_key == "qr":
             self.stamp_hint_var.set("二维码：输入内容后可在预览中拖拽位置并调整透明度。")
         elif mode_key == "seam":
@@ -2082,6 +3083,7 @@ class PDFConverterApp:
         self.stamp_seam_side_combo.config(state=seam_state)
         self.stamp_seam_align_combo.config(state=seam_state)
         self.stamp_seam_overlap_entry.config(state=('normal' if mode_key == "seam" else 'disabled'))
+        self.stamp_export_template_btn.config(state=('disabled' if mode_key == "signature" else 'normal'))
 
         self._update_stamp_preview_info()
         self.save_settings()
@@ -2112,35 +3114,107 @@ class PDFConverterApp:
             self.reorder_hint_var.set("页面倒序：整本 PDF 按页倒序输出。")
         self.save_settings()
 
-    def _open_reorder_preview_dialog(self):
-        if not PIL_AVAILABLE:
-            messagebox.showwarning("提示", "顺序预览需要 Pillow 依赖。")
-            return
-        if not FITZ_UI_AVAILABLE:
-            messagebox.showwarning("提示", "顺序预览需要 PyMuPDF 依赖。")
-            return
-        if not self.selected_files_list:
-            messagebox.showwarning("提示", "请先选择一个 PDF 文件。")
-            return
+    def _on_bookmark_mode_changed(self, event=None, save=True):
+        mode = self.bookmark_mode_var.get()
 
-        pdf_path = self.selected_files_list[0]
-        if not (pdf_path and os.path.exists(pdf_path) and pdf_path.lower().endswith(".pdf")):
-            messagebox.showwarning("提示", "当前文件不是有效的 PDF。")
-            return
+        is_add = mode == "添加书签"
+        is_remove = mode == "移除书签"
+        is_import = mode == "导入JSON"
+        is_export = mode == "导出JSON"
+        is_auto = mode == "自动生成"
 
+        self.bookmark_level_combo.config(state=('readonly' if is_add else 'disabled'))
+        self.bookmark_page_entry.config(state=('normal' if is_add else 'disabled'))
+        self.bookmark_title_entry.config(state=('normal' if is_add else 'disabled'))
+
+        self.bookmark_remove_levels_entry.config(state=('normal' if is_remove else 'disabled'))
+        self.bookmark_remove_keyword_entry.config(state=('normal' if is_remove else 'disabled'))
+
+        json_state = 'normal' if (is_import or is_export) else 'disabled'
+        self.bookmark_json_entry.config(state=json_state)
+        self.bookmark_json_btn.config(state=('normal' if (is_import or is_export) else 'disabled'))
+
+        self.bookmark_auto_pattern_entry.config(state=('normal' if is_auto else 'disabled'))
+        self.bookmark_merge_cb.config(state=('normal' if (is_import or is_auto) else 'disabled'))
+
+        if is_add:
+            self.bookmark_hint_var.set("添加书签：填写标题、页码、级别，写入新PDF。")
+            self.bookmark_json_btn.config(text="选择...")
+        elif is_remove:
+            self.bookmark_hint_var.set("移除书签：按级别(如1,2)和/或关键词批量删除。")
+            self.bookmark_json_btn.config(text="选择...")
+        elif is_import:
+            self.bookmark_hint_var.set("导入JSON：支持 [{level,title,page}] 或 {toc:[...]} 格式。")
+            self.bookmark_json_btn.config(text="选择JSON...")
+        elif is_export:
+            self.bookmark_hint_var.set("导出JSON：仅导出现有书签到JSON，不修改PDF。")
+            self.bookmark_json_btn.config(text="保存到...")
+        elif mode == "清空书签":
+            self.bookmark_hint_var.set("清空书签：删除PDF中全部书签并输出新PDF。")
+            self.bookmark_json_btn.config(text="选择...")
+        else:
+            self.bookmark_hint_var.set("自动生成：按“自动规则”匹配标题，建议先预览结果。")
+            self.bookmark_json_btn.config(text="选择...")
+
+        if save:
+            self.save_settings()
+
+    def _choose_bookmark_json_path(self):
+        mode = self.bookmark_mode_var.get()
+        if mode == "导出JSON":
+            filename = filedialog.asksaveasfilename(
+                title="选择书签JSON保存位置",
+                defaultextension=".json",
+                filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+            )
+        else:
+            filename = filedialog.askopenfilename(
+                title="选择书签JSON文件",
+                filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+            )
+        if filename:
+            self.bookmark_json_path_var.set(filename)
+            self.save_settings()
+
+    def _on_batch_regex_template_changed(self, event=None):
+        name = self.batch_regex_template_var.get().strip()
+        pattern = BATCH_REGEX_TEMPLATE_MAP.get(name, "")
+        if pattern:
+            self.batch_regex_var.set(pattern)
+            self.batch_regex_enabled_var.set(True)
+        elif name == "不使用模板":
+            self.batch_regex_var.set("")
+            self.batch_regex_enabled_var.set(False)
+        self.save_settings()
+
+    def _show_loading_dialog(self, title, text):
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("360x130")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        tk.Label(win, text=text, font=("Microsoft YaHei", 10), fg="#555").pack(
+            anchor="w", padx=16, pady=(16, 8)
+        )
+        pb = ttk.Progressbar(win, mode="indeterminate", length=320)
+        pb.pack(padx=16, pady=(0, 10))
+        pb.start(10)
+        return win, pb
+
+    @staticmethod
+    def _load_reorder_preview_data(pdf_path):
+        doc = fitz.open(pdf_path)
         try:
-            doc = fitz.open(pdf_path)
             total_pages = len(doc)
             if total_pages <= 0:
-                doc.close()
-                messagebox.showwarning("提示", "该 PDF 没有页面。")
-                return
+                return None, "该 PDF 没有页面。"
 
             page_infos = []
             for i in range(total_pages):
                 page = doc[i]
                 rect = page.rect
-                # 缩略图使用较低分辨率，保证弹窗流畅
                 pix = page.get_pixmap(matrix=fitz.Matrix(0.22, 0.22), alpha=False)
                 pil_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
                 page_infos.append({
@@ -2148,9 +3222,94 @@ class PDFConverterApp:
                     "size_text": f"{int(rect.width)}x{int(rect.height)}",
                     "thumb": pil_img,
                 })
+            return (total_pages, page_infos), ""
+        finally:
             doc.close()
-        except Exception as exc:
-            messagebox.showerror("预览失败", f"读取 PDF 失败：\n{exc}")
+
+    def _load_stamp_preview_data(self, source_pdf):
+        full = os.path.abspath(source_pdf)
+        mtime = self._get_file_mtime_safe(full)
+        with self._preview_cache_lock:
+            cached = self._pdf_preview_cache.get(full)
+        if cached and cached.get("mtime") == mtime and cached.get("first_page_png"):
+            try:
+                page_image = Image.open(io.BytesIO(cached["first_page_png"])).convert("RGB")
+                return (page_image, int(cached.get("page_count", 1))), ""
+            except Exception:
+                pass
+
+        doc = fitz.open(full)
+        try:
+            if len(doc) == 0:
+                return None, "该PDF没有可预览的页面。"
+            first_page = doc[0]
+            page_count = len(doc)
+            pix = first_page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
+            png_bytes = pix.tobytes("png")
+            page_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+            with self._preview_cache_lock:
+                self._pdf_preview_cache[full] = {
+                    "mtime": mtime,
+                    "page_count": page_count,
+                    "first_page_png": png_bytes,
+                }
+            return (page_image, page_count), ""
+        finally:
+            doc.close()
+
+    def _open_reorder_preview_dialog(self, preloaded=None, pdf_path=None):
+        if preloaded is None:
+            if not PIL_AVAILABLE:
+                messagebox.showwarning("提示", "顺序预览需要 Pillow 依赖。")
+                return
+            if not FITZ_UI_AVAILABLE:
+                messagebox.showwarning("提示", "顺序预览需要 PyMuPDF 依赖。")
+                return
+            if not self.selected_files_list:
+                messagebox.showwarning("提示", "请先选择一个 PDF 文件。")
+                return
+
+            pdf_path = self.selected_files_list[0]
+            if not (pdf_path and os.path.exists(pdf_path) and pdf_path.lower().endswith(".pdf")):
+                messagebox.showwarning("提示", "当前文件不是有效的 PDF。")
+                return
+
+            loading_win, loading_pb = self._show_loading_dialog(
+                "页面预览加载中", "正在读取PDF并生成缩略图，请稍候..."
+            )
+
+            def worker():
+                try:
+                    payload, err = self._load_reorder_preview_data(pdf_path)
+                except Exception as exc:
+                    payload, err = None, str(exc)
+
+                def on_done():
+                    try:
+                        loading_pb.stop()
+                    except Exception:
+                        pass
+                    try:
+                        loading_win.destroy()
+                    except Exception:
+                        pass
+                    if err or not payload:
+                        messagebox.showerror("预览失败", f"读取 PDF 失败：\n{err or '未知错误'}")
+                        return
+                    self._open_reorder_preview_dialog(preloaded=payload, pdf_path=pdf_path)
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+
+        total_pages, page_infos = preloaded
+
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("提示", "顺序预览需要 Pillow 依赖。")
+            return
+        if not FITZ_UI_AVAILABLE:
+            messagebox.showwarning("提示", "顺序预览需要 PyMuPDF 依赖。")
             return
 
         # 初始顺序：优先使用输入框已有顺序，否则默认自然顺序
@@ -2169,7 +3328,7 @@ class PDFConverterApp:
         resized_cache = {}
         card_boxes = {}
         card_centers = []
-        drag_state = {"page_idx": None}
+        drag_state = {"page_idx": None, "panning": False}
         tk_refs = []
 
         dialog = tk.Toplevel(self.root)
@@ -2371,13 +3530,19 @@ class PDFConverterApp:
             p = page_from_canvas_xy(event.x, event.y)
             if p is None:
                 drag_state["page_idx"] = None
+                drag_state["panning"] = True
+                preview_canvas.scan_mark(event.x, event.y)
                 return
+            drag_state["panning"] = False
             selected_page.set(p)
             drag_state["page_idx"] = p
             refresh_tree()
             redraw_cards()
 
         def on_canvas_drag(event):
+            if drag_state.get("panning"):
+                preview_canvas.scan_dragto(event.x, event.y, gain=1)
+                return
             p = drag_state.get("page_idx")
             if p is None or p not in order:
                 return
@@ -2398,6 +3563,7 @@ class PDFConverterApp:
 
         def on_canvas_release(_event):
             drag_state["page_idx"] = None
+            drag_state["panning"] = False
 
         def on_canvas_wheel(event):
             step = -3 if event.delta > 0 else 3
@@ -2509,6 +3675,429 @@ class PDFConverterApp:
             self.watermark_image_path = filename
             name = os.path.basename(filename)
             self.watermark_img_label.config(text=name if len(name) <= 15 else name[:12] + "...")
+            self.save_settings()
+
+    def _resolve_watermark_mode(self, ui_value=None):
+        ui_key = (ui_value if ui_value is not None else self.watermark_position_var.get()).strip()
+        return WATERMARK_POSITION_TO_MODE.get(ui_key, ("tile", "grid"))
+
+    def _open_watermark_preview(self, preloaded=None):
+        if preloaded is None:
+            if not PIL_AVAILABLE:
+                messagebox.showwarning("提示", "水印预览需要 Pillow 依赖。")
+                return
+            if not FITZ_UI_AVAILABLE:
+                messagebox.showwarning("提示", "水印预览需要 PyMuPDF 依赖。")
+                return
+            source_pdf = self._resolve_preview_pdf()
+            if not source_pdf:
+                messagebox.showwarning("提示", "请先选择至少一个 PDF 文件，再打开预览。")
+                return
+            has_img = bool(self.watermark_image_path and os.path.exists(self.watermark_image_path))
+            has_text = bool((self.watermark_text_var.get() or "").strip())
+            if not has_img and not has_text:
+                messagebox.showwarning("提示", "请先填写水印文字或选择水印图片。")
+                return
+
+            loading_win, loading_pb = self._show_loading_dialog(
+                "水印预览加载中", "正在读取PDF页面预览，请稍候..."
+            )
+
+            def worker():
+                try:
+                    payload, err = self._load_stamp_preview_data(source_pdf)
+                except Exception as exc:
+                    payload, err = None, str(exc)
+
+                def on_done():
+                    try:
+                        loading_pb.stop()
+                    except Exception:
+                        pass
+                    try:
+                        loading_win.destroy()
+                    except Exception:
+                        pass
+                    if err or not payload:
+                        messagebox.showerror("预览失败", f"读取PDF预览失败：\n{err or '未知错误'}")
+                        return
+                    page_image, page_count = payload
+                    self._open_watermark_preview(preloaded={
+                        "source_pdf": source_pdf,
+                        "page_image": page_image,
+                        "page_count": page_count,
+                    })
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+
+        source_pdf = preloaded.get("source_pdf", "")
+        page_image = preloaded.get("page_image")
+        page_count = int(preloaded.get("page_count", 1))
+        if page_image is None:
+            messagebox.showerror("预览失败", "预览数据为空，请重试。")
+            return
+
+        has_image = bool(self.watermark_image_path and os.path.exists(self.watermark_image_path))
+        wm_text = (self.watermark_text_var.get() or "").strip()
+        if not has_image and not wm_text:
+            messagebox.showwarning("提示", "请先填写水印文字或选择水印图片。")
+            return
+
+        try:
+            init_opacity = int(self._clamp_value(float(self.watermark_opacity_var.get()), 0.05, 1.0, 0.3) * 100)
+        except Exception:
+            init_opacity = 30
+        try:
+            init_rotate = int(self.watermark_rotation_var.get())
+        except Exception:
+            init_rotate = 45
+        try:
+            init_size = int(self.watermark_fontsize_var.get())
+        except Exception:
+            init_size = 40
+        init_size = max(10, min(120, init_size))
+        try:
+            init_random_strength = int(self._clamp_value(float(self.watermark_random_strength_var.get()), 0.0, 1.0, 0.35) * 100)
+        except Exception:
+            init_random_strength = 35
+        try:
+            init_spacing = int(self._clamp_value(float(self.watermark_spacing_var.get()), 0.5, 2.0, 1.0) * 100)
+        except Exception:
+            init_spacing = 100
+        init_pos = self.watermark_position_var.get().strip()
+        if init_pos not in WATERMARK_POSITION_OPTIONS:
+            init_pos = "平铺(网格)"
+
+        preview_win = tk.Toplevel(self.root)
+        preview_win.title("水印预览")
+        screen_w = max(1000, preview_win.winfo_screenwidth())
+        screen_h = max(760, preview_win.winfo_screenheight())
+        win_w = min(1120, screen_w - 80)
+        win_h = min(840, screen_h - 120)
+        win_w = max(900, win_w)
+        win_h = max(640, win_h)
+        pos_x = max(0, int((screen_w - win_w) / 2))
+        pos_y = max(0, int((screen_h - win_h) / 2))
+        preview_win.geometry(f"{int(win_w)}x{int(win_h)}+{pos_x}+{pos_y}")
+        preview_win.minsize(860, 620)
+        preview_win.resizable(True, True)
+        preview_win.transient(self.root)
+        preview_win.grab_set()
+
+        info_row = tk.Frame(preview_win)
+        info_row.pack(fill=tk.X, padx=12, pady=(10, 4))
+        tk.Label(
+            info_row,
+            text=f"预览文件：{os.path.basename(source_pdf)}  第1页 / 共{page_count}页",
+            font=("Microsoft YaHei", 9),
+            fg="#666",
+        ).pack(side=tk.LEFT)
+
+        control_row1 = tk.Frame(preview_win)
+        control_row1.pack(fill=tk.X, padx=12, pady=(0, 4))
+        size_var = tk.DoubleVar(value=init_size)
+        rotate_var = tk.DoubleVar(value=init_rotate)
+        opacity_var = tk.DoubleVar(value=init_opacity)
+        tk.Label(control_row1, text="大小:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        size_scale = tk.Scale(control_row1, from_=10, to=120, orient=tk.HORIZONTAL, resolution=1,
+                              showvalue=True, variable=size_var, length=180)
+        size_scale.pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(control_row1, text="角度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        rotate_scale = tk.Scale(control_row1, from_=-180, to=180, orient=tk.HORIZONTAL, resolution=1,
+                                showvalue=True, variable=rotate_var, length=180)
+        rotate_scale.pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(control_row1, text="透明度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        opacity_scale = tk.Scale(control_row1, from_=5, to=100, orient=tk.HORIZONTAL, resolution=1,
+                                 showvalue=True, variable=opacity_var, length=180)
+        opacity_scale.pack(side=tk.LEFT, padx=(4, 0))
+
+        control_row2 = tk.Frame(preview_win)
+        control_row2.pack(fill=tk.X, padx=12, pady=(0, 6))
+        pos_var = tk.StringVar(value=init_pos)
+        spacing_var = tk.DoubleVar(value=init_spacing)
+        random_size_var = tk.BooleanVar(value=bool(self.watermark_random_size_var.get()))
+        random_strength_var = tk.DoubleVar(value=init_random_strength)
+        tk.Label(control_row2, text="排列:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        pos_combo = ttk.Combobox(
+            control_row2, textvariable=pos_var,
+            values=WATERMARK_POSITION_OPTIONS,
+            state="readonly", width=11, font=("Microsoft YaHei", 9)
+        )
+        pos_combo.pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(control_row2, text="疏密:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        spacing_scale = tk.Scale(
+            control_row2, from_=50, to=200, orient=tk.HORIZONTAL, resolution=1,
+            showvalue=True, variable=spacing_var, length=150
+        )
+        spacing_scale.pack(side=tk.LEFT, padx=(4, 10))
+        tk.Checkbutton(
+            control_row2, text="随机大小",
+            variable=random_size_var, font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(control_row2, text="随机强度:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        random_strength_scale = tk.Scale(
+            control_row2, from_=0, to=100, orient=tk.HORIZONTAL, resolution=1,
+            showvalue=True, variable=random_strength_var, length=180
+        )
+        random_strength_scale.pack(side=tk.LEFT, padx=(4, 0))
+
+        canvas_frame = tk.Frame(preview_win, bg="#f5f5f5")
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        canvas = tk.Canvas(
+            canvas_frame, width=920, height=520, bg="#f5f5f5",
+            highlightthickness=1, highlightbackground="#cccccc"
+        )
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        action_row = tk.Frame(preview_win)
+        action_row.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        state = {"job": None, "page_tk": None}
+        page_cache = {}
+        text_stamp_cache = {}
+        image_stamp_cache = {}
+        font_cache = {}
+
+        def get_page_display(fit_w, fit_h):
+            fit_w = max(220, int(fit_w))
+            fit_h = max(220, int(fit_h))
+            cache_key = (fit_w, fit_h)
+            if cache_key in page_cache:
+                return page_cache[cache_key]
+            scale = min(fit_w / page_image.width, fit_h / page_image.height, 1.0)
+            disp_w = max(1, int(page_image.width * scale))
+            disp_h = max(1, int(page_image.height * scale))
+            disp = page_image.resize((disp_w, disp_h), Image.LANCZOS) if (disp_w != page_image.width or disp_h != page_image.height) else page_image.copy()
+            page_cache[cache_key] = (disp, disp_w, disp_h)
+            return page_cache[cache_key]
+
+        def get_font(sz):
+            key = int(max(8, min(220, sz)))
+            if key in font_cache:
+                return font_cache[key]
+            candidates = [
+                r"C:\Windows\Fonts\msyh.ttc",
+                r"C:\Windows\Fonts\simhei.ttf",
+                r"C:\Windows\Fonts\simsun.ttc",
+                r"C:\Windows\Fonts\arial.ttf",
+            ]
+            font = None
+            for fp in candidates:
+                if os.path.exists(fp):
+                    try:
+                        font = ImageFont.truetype(fp, key)
+                        break
+                    except Exception:
+                        pass
+            if font is None:
+                try:
+                    font = ImageFont.load_default()
+                except Exception:
+                    font = None
+            font_cache[key] = font
+            return font
+
+        def tile_factor(row, col):
+            if not bool(random_size_var.get()):
+                return 1.0
+            strength = self._clamp_value(random_strength_var.get() / 100.0, 0.0, 1.0, 0.35)
+            rnd = random.Random((row + 1) * 9176 + (col + 1) * 101 + 1000003)
+            return max(0.25, 1.0 + (rnd.random() * 2.0 - 1.0) * strength)
+
+        def iter_positions(mode_key, layout_key, w, h, base_w, base_h):
+            if mode_key == "tile":
+                spacing = self._clamp_value(spacing_var.get() / 100.0, 0.5, 2.0, 1.0)
+                gap_x = max(base_w * 1.5, 90.0) * spacing
+                gap_y = max(base_h * 1.7, 90.0) * spacing
+                if layout_key == "row":
+                    gap_y *= 2.2
+                elif layout_key == "col":
+                    gap_x *= 2.2
+                y = gap_y * 0.5
+                row = 0
+                while y < h + base_h:
+                    x = gap_x * 0.5 + (gap_x * 0.5 if (layout_key == "diag" and row % 2 == 1) else 0.0)
+                    col = 0
+                    while x < w + base_w:
+                        yield x, y, row, col
+                        x += gap_x
+                        col += 1
+                    y += gap_y
+                    row += 1
+                return
+
+            margin = 24.0
+            if mode_key == "center":
+                yield w / 2.0, h / 2.0, 0, 0
+            elif mode_key == "top-center":
+                yield w / 2.0, margin + base_h / 2.0, 0, 0
+            elif mode_key == "bottom-center":
+                yield w / 2.0, h - margin - base_h / 2.0, 0, 0
+            elif mode_key == "top-left":
+                yield margin + base_w / 2.0, margin + base_h / 2.0, 0, 0
+            elif mode_key == "top-right":
+                yield w - margin - base_w / 2.0, margin + base_h / 2.0, 0, 0
+            elif mode_key == "bottom-left":
+                yield margin + base_w / 2.0, h - margin - base_h / 2.0, 0, 0
+            elif mode_key == "bottom-right":
+                yield w - margin - base_w / 2.0, h - margin - base_h / 2.0, 0, 0
+            else:
+                yield w / 2.0, h / 2.0, 0, 0
+
+        def paste_alpha(dst, src, x, y):
+            ix, iy = int(round(x)), int(round(y))
+            left = max(0, ix)
+            top = max(0, iy)
+            right = min(dst.width, ix + src.width)
+            bottom = min(dst.height, iy + src.height)
+            if right <= left or bottom <= top:
+                return
+            crop = src.crop((left - ix, top - iy, right - ix, bottom - iy))
+            dst.alpha_composite(crop, (left, top))
+
+        def get_text_stamp(font_px, opacity01, rotate_deg):
+            key = (wm_text, int(font_px), int(opacity01 * 1000), int(rotate_deg))
+            if key in text_stamp_cache:
+                return text_stamp_cache[key]
+            font = get_font(font_px)
+            if not font:
+                out = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+                text_stamp_cache[key] = out
+                return out
+            tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+            d0 = ImageDraw.Draw(tmp)
+            bbox = d0.textbbox((0, 0), wm_text, font=font)
+            w = max(1, bbox[2] - bbox[0])
+            h = max(1, bbox[3] - bbox[1])
+            pad = max(4, int(font_px * 0.3))
+            img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
+            d1 = ImageDraw.Draw(img)
+            d1.text(
+                (pad - bbox[0], pad - bbox[1]),
+                wm_text,
+                font=font,
+                fill=(100, 100, 100, int(255 * opacity01))
+            )
+            if abs(rotate_deg) > 0.01:
+                img = img.rotate(rotate_deg, expand=True, resample=Image.BICUBIC)
+            text_stamp_cache[key] = img
+            return img
+
+        def get_image_base(opacity01, rotate_deg):
+            key = (self.watermark_image_path or "", int(opacity01 * 1000), int(rotate_deg))
+            if key in image_stamp_cache:
+                return image_stamp_cache[key]
+            if not has_image:
+                return None
+            base = Image.open(self.watermark_image_path).convert("RGBA")
+            alpha = base.split()[3]
+            alpha = alpha.point(lambda a: int(a * opacity01))
+            base.putalpha(alpha)
+            if abs(rotate_deg) > 0.01:
+                base = base.rotate(rotate_deg, expand=True, resample=Image.BICUBIC)
+            image_stamp_cache[key] = base
+            return base
+
+        def compose_preview(page_disp):
+            disp = page_disp.convert("RGBA")
+            overlay = Image.new("RGBA", disp.size, (0, 0, 0, 0))
+            opacity01 = self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.3)
+            rotate_deg = float(rotate_var.get())
+            mode_key, layout_key = self._resolve_watermark_mode(pos_var.get())
+            base_size = float(size_var.get())
+
+            if has_image:
+                base = get_image_base(opacity01, rotate_deg)
+                if base is not None:
+                    if mode_key == "tile":
+                        nominal_w = max(14, int(disp.width * 0.22 * (base_size / 40.0)))
+                    else:
+                        nominal_w = max(16, int(disp.width * 0.33 * (base_size / 40.0)))
+                    nominal_h = max(10, int(nominal_w * base.height / max(1, base.width)))
+                    for cx, cy, row, col in iter_positions(mode_key, layout_key, disp.width, disp.height, nominal_w, nominal_h):
+                        factor = tile_factor(row, col) if mode_key == "tile" else 1.0
+                        tw = max(10, int(nominal_w * factor))
+                        th = max(10, int(nominal_h * factor))
+                        stamp = base.resize((tw, th), Image.LANCZOS) if (tw != base.width or th != base.height) else base
+                        paste_alpha(overlay, stamp, cx - tw / 2.0, cy - th / 2.0)
+            else:
+                if wm_text:
+                    base_font = max(10, int(base_size))
+                    est_w = max(20, int(base_font * max(1, len(wm_text)) * 0.6))
+                    est_h = max(16, int(base_font * 1.5))
+                    for cx, cy, row, col in iter_positions(mode_key, layout_key, disp.width, disp.height, est_w, est_h):
+                        factor = tile_factor(row, col) if mode_key == "tile" else 1.0
+                        draw_font = max(8, int(base_font * factor))
+                        stamp = get_text_stamp(draw_font, opacity01, rotate_deg)
+                        sw, sh = stamp.size
+                        paste_alpha(overlay, stamp, cx - sw / 2.0, cy - sh / 2.0)
+
+            return Image.alpha_composite(disp, overlay).convert("RGB")
+
+        def redraw():
+            state["job"] = None
+            canvas.update_idletasks()
+            cw = max(1, canvas.winfo_width())
+            ch = max(1, canvas.winfo_height())
+            pad = 18
+            page_disp, disp_w, disp_h = get_page_display(cw - pad * 2, ch - pad * 2)
+            final_img = compose_preview(page_disp)
+            ox = (cw - disp_w) / 2.0
+            oy = (ch - disp_h) / 2.0
+            tk_img = ImageTk.PhotoImage(final_img)
+            state["page_tk"] = tk_img
+            canvas.delete("all")
+            canvas.create_image(ox, oy, anchor="nw", image=tk_img)
+            canvas.create_rectangle(ox, oy, ox + disp_w, oy + disp_h, outline="#bdbdbd")
+
+        def schedule_redraw(delay=28):
+            if state["job"] is not None:
+                try:
+                    preview_win.after_cancel(state["job"])
+                except Exception:
+                    pass
+            state["job"] = preview_win.after(delay, redraw)
+
+        def on_random_toggle():
+            random_strength_scale.configure(state=("normal" if random_size_var.get() else "disabled"))
+            schedule_redraw(10)
+
+        def apply_preview():
+            self.watermark_opacity_var.set(f"{self._clamp_value(opacity_var.get() / 100.0, 0.05, 1.0, 0.3):.2f}")
+            self.watermark_rotation_var.set(str(int(round(rotate_var.get()))))
+            self.watermark_fontsize_var.set(str(int(round(size_var.get()))))
+            self.watermark_size_scale_var.set(f"{self._clamp_value(size_var.get() / 40.0, 0.2, 3.0, 1.0):.3f}")
+            self.watermark_spacing_var.set(f"{self._clamp_value(spacing_var.get() / 100.0, 0.5, 2.0, 1.0):.3f}")
+            self.watermark_position_var.set(pos_var.get())
+            self.watermark_random_size_var.set(bool(random_size_var.get()))
+            self.watermark_random_strength_var.set(f"{self._clamp_value(random_strength_var.get() / 100.0, 0.0, 1.0, 0.35):.3f}")
+            self.save_settings()
+            preview_win.destroy()
+
+        tk.Button(
+            action_row, text="取消", command=preview_win.destroy,
+            font=("Microsoft YaHei", 9), width=12
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            action_row, text="确定并应用", command=apply_preview,
+            font=("Microsoft YaHei", 9, "bold"), width=14
+        ).pack(side=tk.RIGHT)
+
+        size_scale.configure(command=lambda _v=None: schedule_redraw())
+        rotate_scale.configure(command=lambda _v=None: schedule_redraw())
+        opacity_scale.configure(command=lambda _v=None: schedule_redraw())
+        pos_combo.bind("<<ComboboxSelected>>", lambda _e: schedule_redraw(10))
+        spacing_scale.configure(command=lambda _v=None: schedule_redraw())
+        random_size_var.trace_add("write", lambda *_a: on_random_toggle())
+        random_strength_scale.configure(command=lambda _v=None: schedule_redraw())
+        canvas.bind("<Configure>", lambda _e: schedule_redraw(60))
+        preview_win.protocol("WM_DELETE_WINDOW", preview_win.destroy)
+
+        on_random_toggle()
+        schedule_redraw(1)
 
     def _open_file_order_dialog(self):
         """打开文件排序对话框，让用户调整文件顺序"""
@@ -2667,76 +4256,83 @@ class PDFConverterApp:
 
     def browse_file(self):
         func = self.current_function_var.get()
+        old_cursor = self.root.cget("cursor")
+        try:
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
 
-        if func in ("PDF转Word", "PDF转图片", "PDF合并", "PDF批量文本/图片提取", "PDF批量盖章"):
-            # 多选PDF文件
-            filenames = filedialog.askopenfilenames(
-                title="选择PDF文件（可多选）",
-                filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
-            )
-            if filenames:
-                self.selected_files_list = list(filenames)
-                count = len(self.selected_files_list)
-                if count == 1:
-                    self.selected_file.set(filenames[0])
-                    self.status_message.set(f"已选择: {os.path.basename(filenames[0])}")
-                else:
-                    self.selected_file.set(f"已选择 {count} 个PDF文件")
-                    names = ", ".join(os.path.basename(f) for f in filenames[:3])
-                    if count > 3:
-                        names += f" 等共{count}个"
-                    self.status_message.set(f"已选择: {names}")
-                # 更新合并信息
-                if func == "PDF合并":
-                    self.merge_info_label.config(
-                        text=f"已选择 {count} 个文件，将按选择顺序合并"
-                    )
+            if func in ("PDF转Word", "PDF转图片", "PDF合并", "PDF批量文本/图片提取", "PDF批量盖章"):
+                # 多选PDF文件
+                filenames = filedialog.askopenfilenames(
+                    title="选择PDF文件（可多选）",
+                    filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
+                )
+                if filenames:
+                    self.selected_files_list = list(filenames)
+                    count = len(self.selected_files_list)
+                    if count == 1:
+                        self.selected_file.set(filenames[0])
+                        self.status_message.set(f"已选择: {os.path.basename(filenames[0])}")
+                    else:
+                        self.selected_file.set(f"已选择 {count} 个PDF文件")
+                        names = ", ".join(os.path.basename(f) for f in filenames[:3])
+                        if count > 3:
+                            names += f" 等共{count}个"
+                        self.status_message.set(f"已选择: {names}")
+                    # 更新合并信息
+                    if func == "PDF合并":
+                        self.merge_info_label.config(
+                            text=f"已选择 {count} 个文件，将按选择顺序合并"
+                        )
 
-        elif func == "PDF拆分":
-            # 单选PDF
-            filename = filedialog.askopenfilename(
-                title="选择PDF文件",
-                filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
-            )
-            if filename:
-                self.selected_file.set(filename)
-                self.selected_files_list = [filename]
-                self.status_message.set(f"已选择: {os.path.basename(filename)}")
+            elif func == "PDF拆分":
+                # 单选PDF
+                filename = filedialog.askopenfilename(
+                    title="选择PDF文件",
+                    filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
+                )
+                if filename:
+                    self.selected_file.set(filename)
+                    self.selected_files_list = [filename]
+                    self.status_message.set(f"已选择: {os.path.basename(filename)}")
 
-        elif func == "图片转PDF":
-            # 多选图片
-            filenames = filedialog.askopenfilenames(
-                title="选择图片文件（可多选）",
-                filetypes=[
-                    ("图片文件", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tiff;*.tif;*.webp"),
-                    ("所有文件", "*.*")
-                ]
-            )
-            if filenames:
-                self.selected_files_list = list(filenames)
-                count = len(self.selected_files_list)
-                if count == 1:
-                    self.selected_file.set(filenames[0])
-                    self.status_message.set(
-                        f"已选择: {os.path.basename(filenames[0])}")
-                else:
-                    self.selected_file.set(f"已选择 {count} 张图片")
-                    names = ", ".join(os.path.basename(f) for f in filenames[:3])
-                    if count > 3:
-                        names += f" 等共{count}个"
-                    self.status_message.set(f"已选择: {names}")
+            elif func == "图片转PDF":
+                # 多选图片
+                filenames = filedialog.askopenfilenames(
+                    title="选择图片文件（可多选）",
+                    filetypes=[
+                        ("图片文件", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tiff;*.tif;*.webp"),
+                        ("所有文件", "*.*")
+                    ]
+                )
+                if filenames:
+                    self.selected_files_list = list(filenames)
+                    count = len(self.selected_files_list)
+                    if count == 1:
+                        self.selected_file.set(filenames[0])
+                        self.status_message.set(
+                            f"已选择: {os.path.basename(filenames[0])}")
+                    else:
+                        self.selected_file.set(f"已选择 {count} 张图片")
+                        names = ", ".join(os.path.basename(f) for f in filenames[:3])
+                        if count > 3:
+                            names += f" 等共{count}个"
+                        self.status_message.set(f"已选择: {names}")
 
-        elif func in ("PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF页面重排/旋转/倒序"):
-            # 单选PDF
-            filename = filedialog.askopenfilename(
-                title="选择PDF文件",
-                filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
-            )
-            if filename:
-                self.selected_file.set(filename)
-                self.selected_files_list = [filename]
-                self.status_message.set(f"已选择: {os.path.basename(filename)}")
+            elif func in ("PDF加水印", "PDF加密/解密", "PDF压缩", "PDF提取/删页", "OCR可搜索PDF", "PDF转Excel", "PDF页面重排/旋转/倒序", "PDF添加/移除书签"):
+                # 单选PDF
+                filename = filedialog.askopenfilename(
+                    title="选择PDF文件",
+                    filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
+                )
+                if filename:
+                    self.selected_file.set(filename)
+                    self.selected_files_list = [filename]
+                    self.status_message.set(f"已选择: {os.path.basename(filename)}")
+        finally:
+            self.root.config(cursor=old_cursor)
 
+        self._preheat_pdf_metadata_async(self.selected_files_list)
         self._update_order_btn()
 
     def clear_selection(self):
@@ -2793,7 +4389,7 @@ class PDFConverterApp:
                 self.status_message.set("拖拽的文件中没有PDF文件")
                 return
 
-        if func == "PDF页面重排/旋转/倒序" and len(valid) > 1:
+        if func in ("PDF页面重排/旋转/倒序", "PDF添加/移除书签") and len(valid) > 1:
             valid = [valid[0]]
 
         self.selected_files_list = valid
@@ -2814,6 +4410,7 @@ class PDFConverterApp:
                 text=f"已选择 {count} 个文件，将按选择顺序合并"
             )
 
+        self._preheat_pdf_metadata_async(self.selected_files_list)
         self._update_order_btn()
 
     # ==========================================================
@@ -2845,6 +4442,14 @@ class PDFConverterApp:
                 if mode_key in ("seal", "seam") and not self._get_enabled_stamp_profiles():
                     messagebox.showwarning("提示", "请先选择章图，并至少勾选一个章图。")
                     return
+                if mode_key == "signature":
+                    if not self.stamp_image_paths:
+                        messagebox.showwarning("提示", "请先选择签名图片。")
+                        return
+                    signature_items = self._collect_signature_items()
+                    if not signature_items:
+                        messagebox.showwarning("提示", "请先打开“预览设置”，至少在一页勾选并放置一个签名。")
+                        return
                 if mode_key == "qr" and not self.stamp_qr_text_var.get().strip():
                     messagebox.showwarning("提示", "请填写二维码内容。")
                     return
@@ -2867,11 +4472,29 @@ class PDFConverterApp:
                     if angle not in (90, 180, 270):
                         messagebox.showwarning("提示", "旋转角度仅支持 90 / 180 / 270。")
                         return
-
-        for f in self.selected_files_list:
-            if not os.path.exists(f):
-                messagebox.showerror("错误", f"文件不存在：\n{f}")
-                return
+            if func == "PDF添加/移除书签":
+                if len(self.selected_files_list) > 1:
+                    messagebox.showwarning("提示", "书签功能一次只处理一个PDF文件。")
+                    return
+                mode = self.bookmark_mode_var.get()
+                if mode == "添加书签":
+                    if not self.bookmark_title_var.get().strip():
+                        messagebox.showwarning("提示", "请填写书签标题。")
+                        return
+                    if not self.bookmark_page_var.get().strip().isdigit():
+                        messagebox.showwarning("提示", "请填写正确页码（正整数）。")
+                        return
+                elif mode == "移除书签":
+                    has_levels = bool(self.bookmark_remove_levels_var.get().strip())
+                    has_kw = bool(self.bookmark_remove_keyword_var.get().strip())
+                    if not has_levels and not has_kw:
+                        messagebox.showwarning("提示", "请填写移除级别或关键词。")
+                        return
+                elif mode == "导入JSON":
+                    p = self.bookmark_json_path_var.get().strip()
+                    if not p or not os.path.exists(p):
+                        messagebox.showwarning("提示", "请先选择有效的书签JSON文件。")
+                        return
 
         self.convert_btn.config(state=tk.DISABLED)
         self.conversion_active = True
@@ -2890,6 +4513,10 @@ class PDFConverterApp:
 
     def perform_conversion(self):
         try:
+            missing = [f for f in self.selected_files_list if not os.path.exists(f)]
+            if missing:
+                raise FileNotFoundError(f"文件不存在：\n{missing[0]}")
+
             func = self.current_function_var.get()
             if func == "PDF转Word":
                 self._do_convert_to_word()
@@ -2919,6 +4546,8 @@ class PDFConverterApp:
                 self._do_convert_batch_stamp()
             elif func == "PDF页面重排/旋转/倒序":
                 self._do_convert_reorder()
+            elif func == "PDF添加/移除书签":
+                self._do_convert_bookmark()
         except Exception as e:
             logging.error(f"转换异常: {e}", exc_info=True)
             self.root.after(0, lambda: messagebox.showerror(
@@ -2987,6 +4616,7 @@ class PDFConverterApp:
                 start_page=start_page, end_page=end_page,
                 ocr_enabled=self.ocr_enabled_var.get(),
                 formula_api_enabled=self.formula_api_enabled_var.get(),
+                ocr_mode=self.ocr_quality_mode_var.get(),
                 api_key=self.baidu_api_key,
                 secret_key=self.baidu_secret_key,
                 xslt_path=self.xslt_path,
@@ -3068,12 +4698,16 @@ class PDFConverterApp:
             text_mode=text_mode,
             preserve_layout=bool(self.batch_preserve_layout_var.get()),
             ocr_enabled=bool(self.batch_ocr_enabled_var.get()),
+            ocr_mode=self.ocr_quality_mode_var.get(),
             api_key=self.baidu_api_key,
             secret_key=self.baidu_secret_key,
             image_per_page=bool(self.batch_image_per_page_var.get()),
             image_dedupe=bool(self.batch_image_dedupe_var.get()),
             image_format=self.batch_image_format_var.get(),
             zip_output=bool(self.batch_zip_enabled_var.get()),
+            keyword_filter=self.batch_keyword_var.get().strip(),
+            regex_filter=self.batch_regex_var.get().strip(),
+            regex_enabled=bool(self.batch_regex_enabled_var.get()),
         )
 
         # 记录历史
@@ -3108,15 +4742,56 @@ class PDFConverterApp:
         self.root.after(0, _show)
 
     def _do_convert_batch_stamp(self):
-        converter = PDFBatchStampConverter(
-            on_progress=self._simple_progress_callback
-        )
-
         self.root.after(0, lambda: self.progress_bar.config(
             mode='determinate', maximum=100, value=0))
         self.start_time = time.time()
 
         mode_key = self._get_stamp_mode_key()
+        if mode_key == "signature":
+            sign_converter = PDFBatchSignConverter(
+                on_progress=self._simple_progress_callback
+            )
+            sign_items = self._collect_signature_items()
+            result = sign_converter.convert(
+                files=list(self.selected_files_list),
+                signature_items=sign_items,
+                remove_white_bg=bool(self.stamp_remove_white_bg_var.get()),
+            )
+
+            self.history.add({
+                'function': 'PDF批量签名',
+                'input_files': list(self.selected_files_list),
+                'output': ', '.join(result.get('output_files', [])),
+                'success': result.get('success', False),
+                'message': result.get('message', ''),
+                'page_count': result.get('page_count', 0),
+            })
+
+            if not result.get('success'):
+                self.root.after(0, lambda: messagebox.showerror(
+                    "批量签名失败", result.get('message', '未知错误')))
+                self.root.after(0, lambda: self.status_message.set("批量签名失败"))
+                return
+
+            output_files = result.get('output_files', [])
+
+            def _show_sign():
+                msg = (f"{result.get('message', '批量签名完成')}\n\n"
+                       f"输出文件数量：{len(output_files)}")
+                if output_files:
+                    msg += f"\n\n示例输出：\n{output_files[0]}"
+                msg += "\n\n是否打开输出文件夹？"
+                if messagebox.askyesno("批量签名完成", msg) and output_files:
+                    self.open_folder(output_files[0])
+                self.status_message.set("批量签名完成")
+
+            self.root.after(0, _show_sign)
+            return
+
+        converter = PDFBatchStampConverter(
+            on_progress=self._simple_progress_callback
+        )
+
         seam_side_map = {"右侧": "right", "左侧": "left", "顶部": "top", "底部": "bottom"}
         seam_align_map = {"居中": "center", "顶部": "top", "底部": "bottom"}
         opacity_value = self._clamp_value(
@@ -3485,6 +5160,87 @@ class PDFConverterApp:
         self.root.after(0, _show)
 
     # ----------------------------------------------------------
+    # PDF 添加/移除书签
+    # ----------------------------------------------------------
+
+    def _do_convert_bookmark(self):
+        converter = PDFBookmarkConverter(
+            on_progress=self._simple_progress_callback
+        )
+
+        self.root.after(0, lambda: self.progress_bar.config(
+            mode='determinate', maximum=100, value=0))
+        self.start_time = time.time()
+
+        input_file = self.selected_files_list[0]
+        mode_text = self.bookmark_mode_var.get().strip()
+        mode_map = {
+            "添加书签": "add",
+            "移除书签": "remove",
+            "导入JSON": "import_json",
+            "导出JSON": "export_json",
+            "清空书签": "clear",
+            "自动生成": "auto",
+        }
+        mode = mode_map.get(mode_text, "add")
+
+        try:
+            level_i = int(self.bookmark_level_var.get().strip() or "1")
+        except Exception:
+            level_i = 1
+        try:
+            page_i = int(self.bookmark_page_var.get().strip() or "1")
+        except Exception:
+            page_i = 1
+
+        result = converter.convert(
+            input_file=input_file,
+            mode=mode,
+            json_path=self.bookmark_json_path_var.get().strip(),
+            title=self.bookmark_title_var.get().strip(),
+            page=page_i,
+            level=level_i,
+            remove_levels=self.bookmark_remove_levels_var.get().strip(),
+            remove_keyword=self.bookmark_remove_keyword_var.get().strip(),
+            auto_pattern=self.bookmark_auto_pattern_var.get().strip(),
+            merge_existing=bool(self.bookmark_merge_existing_var.get()),
+        )
+
+        output_ref = result.get('output_file', '') or result.get('output_json', '')
+        self.history.add({
+            'function': f'PDF书签-{mode_text}',
+            'input_files': [input_file],
+            'output': output_ref,
+            'success': result.get('success', False),
+            'message': result.get('message', ''),
+            'page_count': result.get('bookmark_count', 0),
+        })
+
+        if not result.get('success'):
+            self.root.after(0, lambda: messagebox.showerror(
+                f"{mode_text}失败", result.get('message', '未知错误')))
+            self.root.after(0, lambda: self.status_message.set(f"{mode_text}失败"))
+            return
+
+        output_pdf = result.get('output_file', '')
+        output_json = result.get('output_json', '')
+
+        def _show():
+            msg = f"{result.get('message', '书签处理完成')}\n\n"
+            if output_pdf:
+                msg += f"输出PDF：\n{output_pdf}\n\n"
+            if output_json:
+                msg += f"输出JSON：\n{output_json}\n\n"
+            msg += "是否打开输出所在文件夹？"
+
+            open_target = output_pdf or output_json
+            if messagebox.askyesno(f"{mode_text}完成", msg) and open_target:
+                self.open_folder(open_target)
+            self.status_message.set(f"{mode_text}完成")
+
+        self.root.after(0, _show)
+
+    # ----------------------------------------------------------
     # 图片 → PDF
     # ----------------------------------------------------------
 
@@ -3545,13 +5301,7 @@ class PDFConverterApp:
             mode='determinate', maximum=100, value=0))
         self.start_time = time.time()
 
-        # 位置映射
-        pos_map = {
-            "平铺": "tile", "居中": "center",
-            "左上角": "top-left", "右上角": "top-right",
-            "左下角": "bottom-left", "右下角": "bottom-right",
-        }
-        position = pos_map.get(self.watermark_position_var.get(), "tile")
+        position, layout = self._resolve_watermark_mode(self.watermark_position_var.get())
 
         try:
             opacity = float(self.watermark_opacity_var.get())
@@ -3562,11 +5312,26 @@ class PDFConverterApp:
             font_size = int(self.watermark_fontsize_var.get())
         except (ValueError, TypeError):
             font_size = 40
+        try:
+            size_scale = float(self.watermark_size_scale_var.get())
+        except (ValueError, TypeError):
+            size_scale = max(0.2, min(3.0, float(font_size) / 40.0))
 
         try:
             rotation = int(self.watermark_rotation_var.get())
         except (ValueError, TypeError):
             rotation = 45
+        try:
+            random_strength = float(self.watermark_random_strength_var.get())
+        except (ValueError, TypeError):
+            random_strength = 0.35
+        try:
+            spacing_scale = float(self.watermark_spacing_var.get())
+        except (ValueError, TypeError):
+            spacing_scale = 1.0
+        random_strength = self._clamp_value(random_strength, 0.0, 1.0, 0.35)
+        spacing_scale = self._clamp_value(spacing_scale, 0.5, 2.0, 1.0)
+        random_size = bool(self.watermark_random_size_var.get())
 
         result = converter.convert(
             input_file=self.selected_files_list[0],
@@ -3576,6 +5341,12 @@ class PDFConverterApp:
             rotation=rotation,
             font_size=font_size,
             position=position,
+            pages_str=self.watermark_pages_var.get().strip(),
+            size_scale=size_scale,
+            layout=layout,
+            spacing_scale=spacing_scale,
+            random_size=random_size,
+            random_strength=random_strength,
         )
 
         # 记录历史
@@ -3803,6 +5574,7 @@ class PDFConverterApp:
             input_file=input_file,
             api_key=self.baidu_api_key,
             secret_key=self.baidu_secret_key,
+            ocr_mode=self.ocr_quality_mode_var.get(),
             start_page=ocr_start,
             end_page=ocr_end,
         )
@@ -3873,6 +5645,7 @@ class PDFConverterApp:
             strategy=strategy,
             merge_sheets=merge_sheets,
             extract_mode=extract_mode,
+            ocr_mode=self.ocr_quality_mode_var.get(),
             api_key=self.baidu_api_key,
             secret_key=self.baidu_secret_key,
         )
@@ -4086,6 +5859,29 @@ class PDFConverterApp:
         except Exception as e:
             messagebox.showerror("错误", f"无法设置背景图片：\n{str(e)}")
 
+    def clear_background_image(self):
+        self.bg_image_path = None
+        self.bg_image = None
+        self.bg_pil = None
+
+        if self.bg_label is not None:
+            try:
+                self.bg_label.destroy()
+            except Exception:
+                pass
+            self.bg_label = None
+
+        if self.panel_canvas is not None and self.panel_image_id is not None:
+            try:
+                self.panel_canvas.delete(self.panel_image_id)
+            except Exception:
+                pass
+            self.panel_image_id = None
+        self.panel_image = None
+
+        self.save_settings()
+        self.status_message.set("背景已清除")
+
     def apply_background_image(self):
         if not PIL_AVAILABLE:
             return
@@ -4192,6 +5988,10 @@ class PDFConverterApp:
             self.baidu_secret_key = simple_decrypt(
                 data.get('baidu_secret_key_enc', ''))
             self.xslt_path = data.get('xslt_path') or None
+            saved_ocr_mode = data.get('ocr_quality_mode', '平衡')
+            if saved_ocr_mode not in OCR_QUALITY_MODES:
+                saved_ocr_mode = '平衡'
+            self.ocr_quality_mode_var.set(saved_ocr_mode)
             # 功能选择和图片选项
             saved_func = data.get('current_function', 'PDF转Word')
             if saved_func in ALL_FUNCTIONS:
@@ -4216,6 +6016,47 @@ class PDFConverterApp:
             if saved_rotate_angle not in ("90", "180", "270"):
                 saved_rotate_angle = "90"
             self.rotate_angle_var.set(saved_rotate_angle)
+            saved_bookmark_mode = data.get('bookmark_mode', '添加书签')
+            if saved_bookmark_mode not in ("添加书签", "移除书签", "导入JSON", "导出JSON", "清空书签", "自动生成"):
+                saved_bookmark_mode = "添加书签"
+            self.bookmark_mode_var.set(saved_bookmark_mode)
+            saved_bookmark_level = str(data.get('bookmark_level', '1'))
+            if saved_bookmark_level not in ("1", "2", "3", "4", "5"):
+                saved_bookmark_level = "1"
+            self.bookmark_level_var.set(saved_bookmark_level)
+            self.bookmark_title_var.set(data.get('bookmark_title', ''))
+            self.bookmark_page_var.set(str(data.get('bookmark_page', '1')))
+            self.bookmark_remove_levels_var.set(data.get('bookmark_remove_levels', ''))
+            self.bookmark_remove_keyword_var.set(data.get('bookmark_remove_keyword', ''))
+            self.bookmark_json_path_var.set(data.get('bookmark_json_path', ''))
+            self.bookmark_auto_pattern_var.set(
+                data.get(
+                    'bookmark_auto_pattern',
+                    r"^(第[一二三四五六七八九十百千万0-9]+[编卷篇章节]|\d+(?:\.\d+){0,3}\s+.+)"
+                )
+            )
+            self.bookmark_merge_existing_var.set(bool(data.get('bookmark_merge_existing', False)))
+            self.watermark_text_var.set(data.get('watermark_text', self.watermark_text_var.get()))
+            self.watermark_opacity_var.set(str(data.get('watermark_opacity', self.watermark_opacity_var.get())))
+            self.watermark_rotation_var.set(str(data.get('watermark_rotation', self.watermark_rotation_var.get())))
+            self.watermark_fontsize_var.set(str(data.get('watermark_fontsize', self.watermark_fontsize_var.get())))
+            self.watermark_size_scale_var.set(str(data.get('watermark_size_scale', self.watermark_size_scale_var.get())))
+            self.watermark_spacing_var.set(str(data.get('watermark_spacing', self.watermark_spacing_var.get())))
+            self.watermark_pages_var.set(str(data.get('watermark_pages', self.watermark_pages_var.get())))
+            saved_wm_pos = data.get('watermark_position', self.watermark_position_var.get())
+            if saved_wm_pos not in WATERMARK_POSITION_OPTIONS:
+                saved_wm_pos = "平铺"
+            self.watermark_position_var.set(saved_wm_pos)
+            self.watermark_random_size_var.set(bool(data.get('watermark_random_size', False)))
+            self.watermark_random_strength_var.set(str(data.get('watermark_random_strength', self.watermark_random_strength_var.get())))
+            saved_wm_img = data.get('watermark_image_path', '') or ''
+            if saved_wm_img and os.path.exists(saved_wm_img):
+                self.watermark_image_path = saved_wm_img
+                nm = os.path.basename(saved_wm_img)
+                self.watermark_img_label.config(text=nm if len(nm) <= 15 else nm[:12] + "...")
+            else:
+                self.watermark_image_path = None
+                self.watermark_img_label.config(text="")
             saved_page_size = data.get('page_size', 'A4')
             if saved_page_size in ("A4", "A3", "Letter", "Legal", "自适应"):
                 self.page_size_var.set(saved_page_size)
@@ -4225,18 +6066,32 @@ class PDFConverterApp:
             # 批量提取选项
             self.batch_text_enabled_var.set(data.get('batch_text_enabled', True))
             self.batch_image_enabled_var.set(data.get('batch_image_enabled', True))
-            self.batch_text_format_var.set(data.get('batch_text_format', 'txt'))
+            saved_batch_text_format = data.get('batch_text_format', 'txt')
+            if saved_batch_text_format not in ('txt', 'json', 'csv', 'xlsx'):
+                saved_batch_text_format = 'txt'
+            self.batch_text_format_var.set(saved_batch_text_format)
             self.batch_text_mode_var.set(data.get('batch_text_mode', '合并为一个文件'))
             self.batch_preserve_layout_var.set(data.get('batch_preserve_layout', True))
             self.batch_ocr_enabled_var.set(data.get('batch_ocr_enabled', False))
             self.batch_pages_var.set(data.get('batch_pages', ''))
             self.batch_image_per_page_var.set(data.get('batch_image_per_page', False))
             self.batch_image_dedupe_var.set(data.get('batch_image_dedupe', False))
-            self.batch_image_format_var.set(data.get('batch_image_format', '原格式'))
+            saved_batch_image_format = data.get('batch_image_format', '原格式')
+            if saved_batch_image_format not in ('原格式', 'PNG', 'JPEG'):
+                saved_batch_image_format = '原格式'
+            self.batch_image_format_var.set(saved_batch_image_format)
             self.batch_zip_enabled_var.set(data.get('batch_zip_enabled', False))
+            self.batch_keyword_var.set(data.get('batch_keyword', ''))
+            self.batch_regex_enabled_var.set(data.get('batch_regex_enabled', False))
+            self.batch_regex_var.set(data.get('batch_regex', ''))
+            saved_regex_tpl = data.get('batch_regex_template', '不使用模板')
+            valid_tpl_names = {name for name, _ in BATCH_REGEX_TEMPLATES}
+            if saved_regex_tpl not in valid_tpl_names:
+                saved_regex_tpl = '不使用模板'
+            self.batch_regex_template_var.set(saved_regex_tpl)
             # 批量盖章选项
             saved_stamp_mode = data.get('stamp_mode', '普通章')
-            if saved_stamp_mode in ("普通章", "二维码", "骑缝章", "模板"):
+            if saved_stamp_mode in ("普通章", "二维码", "骑缝章", "模板", "签名"):
                 self.stamp_mode_var.set(saved_stamp_mode)
             self.stamp_pages_var.set(data.get('stamp_pages', ''))
             self.stamp_opacity_var.set(str(data.get('stamp_opacity', '0.85')))
@@ -4281,6 +6136,26 @@ class PDFConverterApp:
                 for full in self.stamp_image_paths:
                     loaded_profiles[full] = self._normalize_stamp_profile(loaded_profiles.get(full))
                 self.stamp_profiles = loaded_profiles
+            saved_signature_profiles = data.get('signature_page_profiles', {})
+            loaded_signature_profiles = {}
+            if isinstance(saved_signature_profiles, dict):
+                for page_key, page_data in saved_signature_profiles.items():
+                    try:
+                        page_no = int(page_key)
+                    except Exception:
+                        continue
+                    if page_no < 1 or not isinstance(page_data, dict):
+                        continue
+                    kept = {}
+                    for p, prof in page_data.items():
+                        full = os.path.abspath(str(p))
+                        if full in self.stamp_image_paths and isinstance(prof, dict):
+                            norm = self._normalize_stamp_profile(prof)
+                            norm["enabled"] = bool(prof.get("enabled", False))
+                            kept[full] = norm
+                    if kept:
+                        loaded_signature_profiles[str(page_no)] = kept
+            self.signature_page_profiles = loaded_signature_profiles
             self.stamp_template_path = data.get('stamp_template_path', '') or ''
             if self.stamp_template_path and os.path.exists(self.stamp_template_path):
                 nm2 = os.path.basename(self.stamp_template_path)
@@ -4288,13 +6163,36 @@ class PDFConverterApp:
             if self.bg_image_path:
                 self.apply_background_image()
             self._on_reorder_mode_changed()
+            self._on_bookmark_mode_changed(save=False)
             self._on_stamp_mode_changed()
             self._update_stamp_preview_info()
             self._update_api_hint()
         except Exception:
             pass
 
-    def save_settings(self):
+    def save_settings(self, immediate=False):
+        if not getattr(self, "root", None):
+            return
+        if immediate:
+            if self._save_settings_job is not None:
+                try:
+                    self.root.after_cancel(self._save_settings_job)
+                except Exception:
+                    pass
+                self._save_settings_job = None
+            self._save_settings_now()
+            return
+
+        # 防抖写盘：频繁操作时只写最后一次，降低UI卡顿
+        if self._save_settings_job is not None:
+            try:
+                self.root.after_cancel(self._save_settings_job)
+            except Exception:
+                pass
+        self._save_settings_job = self.root.after(250, self._save_settings_now)
+
+    def _save_settings_now(self):
+        self._save_settings_job = None
         data = {
             'title_text': self.title_text_var.get().strip(),
             'background_image': self.bg_image_path,
@@ -4304,14 +6202,35 @@ class PDFConverterApp:
             'baidu_api_key_enc': simple_encrypt(self.baidu_api_key),
             'baidu_secret_key_enc': simple_encrypt(self.baidu_secret_key),
             'xslt_path': self.xslt_path or '',
+            'ocr_quality_mode': self.ocr_quality_mode_var.get(),
             'current_function': self.current_function_var.get(),
             'image_dpi': self.image_dpi_var.get(),
             'image_format': self.image_format_var.get(),
+            'watermark_text': self.watermark_text_var.get(),
+            'watermark_opacity': self.watermark_opacity_var.get(),
+            'watermark_rotation': self.watermark_rotation_var.get(),
+            'watermark_fontsize': self.watermark_fontsize_var.get(),
+            'watermark_size_scale': self.watermark_size_scale_var.get(),
+            'watermark_spacing': self.watermark_spacing_var.get(),
+            'watermark_pages': self.watermark_pages_var.get(),
+            'watermark_position': self.watermark_position_var.get(),
+            'watermark_image_path': self.watermark_image_path or '',
+            'watermark_random_size': bool(self.watermark_random_size_var.get()),
+            'watermark_random_strength': self.watermark_random_strength_var.get(),
             'split_mode': self.split_mode_var.get(),
             'reorder_mode': self.reorder_mode_var.get(),
             'reorder_pages': self.reorder_pages_var.get(),
             'rotate_pages': self.rotate_pages_var.get(),
             'rotate_angle': self.rotate_angle_var.get(),
+            'bookmark_mode': self.bookmark_mode_var.get(),
+            'bookmark_level': self.bookmark_level_var.get(),
+            'bookmark_title': self.bookmark_title_var.get(),
+            'bookmark_page': self.bookmark_page_var.get(),
+            'bookmark_remove_levels': self.bookmark_remove_levels_var.get(),
+            'bookmark_remove_keyword': self.bookmark_remove_keyword_var.get(),
+            'bookmark_json_path': self.bookmark_json_path_var.get(),
+            'bookmark_auto_pattern': self.bookmark_auto_pattern_var.get(),
+            'bookmark_merge_existing': bool(self.bookmark_merge_existing_var.get()),
             'page_size': self.page_size_var.get(),
             'excel_extract_mode': self.excel_extract_mode_var.get(),
             'batch_text_enabled': bool(self.batch_text_enabled_var.get()),
@@ -4325,6 +6244,10 @@ class PDFConverterApp:
             'batch_image_dedupe': bool(self.batch_image_dedupe_var.get()),
             'batch_image_format': self.batch_image_format_var.get(),
             'batch_zip_enabled': bool(self.batch_zip_enabled_var.get()),
+            'batch_keyword': self.batch_keyword_var.get(),
+            'batch_regex_enabled': bool(self.batch_regex_enabled_var.get()),
+            'batch_regex': self.batch_regex_var.get(),
+            'batch_regex_template': self.batch_regex_template_var.get(),
             'stamp_mode': self.stamp_mode_var.get(),
             'stamp_pages': self.stamp_pages_var.get(),
             'stamp_opacity': self.stamp_opacity_var.get(),
@@ -4347,6 +6270,7 @@ class PDFConverterApp:
                 p: self._normalize_stamp_profile(self.stamp_profiles.get(p))
                 for p in self.stamp_image_paths if p
             },
+            'signature_page_profiles': self.signature_page_profiles if isinstance(self.signature_page_profiles, dict) else {},
             'stamp_image_path': self._get_active_stamp_image_path(),
             'stamp_template_path': self.stamp_template_path,
         }
@@ -4395,3 +6319,10 @@ class PDFConverterApp:
             os.startfile(folder)
         except Exception as e:
             messagebox.showerror("错误", f"无法打开文件夹：\n{str(e)}")
+
+    def _on_root_close(self):
+        try:
+            self.save_settings(immediate=True)
+        except Exception:
+            pass
+        self.root.destroy()
